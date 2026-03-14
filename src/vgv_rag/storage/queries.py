@@ -38,11 +38,11 @@ async def search_chunks(
     return result.data or []
 
 
-async def upsert_project(name: str, notion_hub_url: str, config: dict = {}) -> str:
+async def upsert_project(name: str, notion_hub_url: str, config: dict | None = None) -> str:
     client = get_client()
     result = await asyncio.to_thread(
         lambda: client.table("projects").upsert(
-            {"name": name, "notion_hub_url": notion_hub_url, "config": config},
+            {"name": name, "notion_hub_url": notion_hub_url, "config": config or {}},
             on_conflict="notion_hub_url",
         ).select("id").execute()
     )
