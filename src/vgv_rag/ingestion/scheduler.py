@@ -77,14 +77,8 @@ def start_scheduler(get_connector) -> AsyncIOScheduler:
         log.info("Sync cycle complete.")
 
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(
-        lambda: run_sync() if is_business_hours() else None,
-        "cron", minute="*/15", hour="8-20", day_of_week="mon-fri",
-    )
-    scheduler.add_job(
-        lambda: run_sync() if not is_business_hours() else None,
-        "cron", minute=0,
-    )
+    scheduler.add_job(run_sync, "cron", minute="*/15", hour="8-20", day_of_week="mon-fri")
+    scheduler.add_job(run_sync, "cron", minute=0)
     scheduler.start()
     log.info("Sync scheduler started.")
     return scheduler
