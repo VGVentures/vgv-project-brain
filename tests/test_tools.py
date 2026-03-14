@@ -1,6 +1,6 @@
 # tests/test_tools.py
 import pytest
-from unittest.mock import AsyncMock, patch, MagicMock
+from unittest.mock import AsyncMock, patch
 
 
 @pytest.mark.asyncio
@@ -55,8 +55,9 @@ async def test_ingest_document_with_content():
     from vgv_rag.server.tools.ingest import handle_ingest_document
     with patch("vgv_rag.server.tools.ingest.get_project_by_name", return_value={"id": "proj-1"}), \
          patch("vgv_rag.server.tools.ingest.upsert_source", return_value="src-1"), \
-         patch("vgv_rag.server.tools.ingest.embed_batch", return_value=[[0.1] * 384]), \
+         patch("vgv_rag.server.tools.ingest.chunk", return_value=["chunk one", "chunk two"]), \
+         patch("vgv_rag.server.tools.ingest.embed_batch", return_value=[[0.1] * 384, [0.2] * 384]), \
          patch("vgv_rag.server.tools.ingest.insert_chunks", return_value=None):
         result = await handle_ingest_document(project="MyProject", content="This is a test document about the project architecture.", artifact_type="document")
-    assert "chunk" in result.lower()
+    assert "2 chunk" in result
     assert "MyProject" in result

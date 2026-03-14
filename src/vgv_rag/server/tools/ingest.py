@@ -23,15 +23,19 @@ async def handle_ingest_document(
 
     text = content
     if url and not content:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(url)
-            text = response.text
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
+                response = await client.get(url)
+                response.raise_for_status()
+                text = response.text
+        except httpx.HTTPError as exc:
+            return f"Error fetching URL: {exc}"
 
     source_id = await upsert_source(
         project_id=proj["id"],
         connector="manual",
         source_url=url or "inline",
-        source_id=url or f"manual-{int(datetime.now().timestamp())}",
+        source_id=url or f"manual-{int(datetime.now(timezone.utc).timestamp())}",
     )
 
     chunks = chunk(text, artifact_type)
