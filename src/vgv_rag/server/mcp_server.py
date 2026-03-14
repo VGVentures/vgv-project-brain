@@ -1,4 +1,5 @@
 from mcp.server.fastmcp import FastMCP
+from vgv_rag.server.tools.search import handle_search_project_context
 
 mcp = FastMCP("vgv-project-rag")
 
@@ -14,7 +15,14 @@ async def search_project_context(
     top_k: int = 5,
 ) -> str:
     """Search project knowledge across Notion, Slack, GitHub, Figma, and Jira. Returns relevant chunks with source links."""
-    return "Not yet implemented"
+    filters = {"artifact_type": artifact_type, "source_tool": source_tool}
+    return await handle_search_project_context(
+        query=query,
+        user_email=DEV_EMAIL,
+        project=project,
+        filters=filters,
+        top_k=top_k,
+    )
 
 
 @mcp.tool()
