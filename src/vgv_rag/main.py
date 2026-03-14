@@ -42,7 +42,7 @@ def create_app() -> Starlette:
     from vgv_rag.server.mcp_server import mcp
     from vgv_rag.ingestion.scheduler import start_scheduler
 
-    def on_startup():
+    async def on_startup():
         registry = build_connector_registry()
         start_scheduler(registry.get)
 
