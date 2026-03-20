@@ -1,6 +1,8 @@
 # src/vgv_rag/main.py
 import logging
 import uvicorn
+
+log = logging.getLogger(__name__)
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -43,6 +45,16 @@ def create_app() -> Starlette:
     from vgv_rag.ingestion.scheduler import start_scheduler
 
     async def on_startup():
+        from vgv_rag.config.settings import settings
+        from vgv_rag.storage.migrate import check_schema
+        if not await check_schema(settings.supabase_url):
+            project_ref = settings.supabase_url.split("//")[1].split(".")[0]
+            log.error(
+                "Database schema not found. Run the migration in the Supabase SQL Editor:\n"
+                "  https://supabase.com/dashboard/project/%s/sql/new\n"
+                "Paste the contents of: src/vgv_rag/storage/migrations/001_initial_schema.sql",
+                project_ref,
+            )
         registry = build_connector_registry()
         start_scheduler(registry.get)
 

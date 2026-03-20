@@ -53,7 +53,7 @@ CREATE TABLE IF NOT EXISTS project_members (
 
 ALTER TABLE chunks ENABLE ROW LEVEL SECURITY;
 
-CREATE POLICY IF NOT EXISTS "Users can read chunks from their projects"
+CREATE POLICY "Users can read chunks from their projects"
     ON chunks FOR SELECT
     USING (
         project_id IN (
