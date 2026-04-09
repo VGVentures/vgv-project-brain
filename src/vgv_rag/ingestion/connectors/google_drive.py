@@ -1,16 +1,23 @@
 import asyncio
 import base64
+import io
 import json
+import logging
 import re
 from datetime import datetime
 from pathlib import Path
 
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+from pdfminer.high_level import extract_text
+from pdfminer.pdfparser import PDFSyntaxError
 
 from vgv_rag.ingestion.connectors.types import (
     ProjectConfig, RawDocument, Source, detect_artifact_type,
 )
+
+log = logging.getLogger(__name__)
 
 SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
 
@@ -18,6 +25,12 @@ SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
 EXPORTABLE_MIMES = {
     "application/vnd.google-apps.document": "text/plain",
     "application/vnd.google-apps.presentation": "text/plain",
+}
+
+# URL templates per MIME type for deep links
+SOURCE_URL_TEMPLATES = {
+    "application/vnd.google-apps.document": "https://docs.google.com/document/d/{file_id}",
+    "application/vnd.google-apps.presentation": "https://docs.google.com/presentation/d/{file_id}",
 }
 
 # MIME types to skip entirely
@@ -28,6 +41,7 @@ SKIP_MIMES = {
 }
 
 MAX_PDF_BYTES = 10 * 1024 * 1024  # 10 MB
+MAX_FOLDER_DEPTH = 20
 
 
 def _detect_drive_artifact_type(title: str, mime_type: str) -> str:
@@ -50,10 +64,11 @@ def _build_drive_service(credentials: str):
     """Build a Google Drive API service from a service account credential.
 
     credentials can be:
-    - A file path to a JSON key file
+    - A file path to a JSON key file (must end in .json)
     - A base64-encoded JSON key string
     """
-    if Path(credentials).is_file():
+    path = Path(credentials)
+    if path.suffix == ".json" and path.is_file():
         creds = Credentials.from_service_account_file(credentials, scopes=SCOPES)
     else:
         key_data = json.loads(base64.b64decode(credentials))
@@ -63,6 +78,15 @@ def _build_drive_service(credentials: str):
 
 def _parse_modified_time(time_str: str) -> datetime:
     return datetime.fromisoformat(time_str.replace("Z", "+00:00"))
+
+
+def _extract_pdf_text(pdf_bytes: bytes) -> str:
+    """Extract text from PDF bytes using pdfminer.six."""
+    try:
+        return extract_text(io.BytesIO(pdf_bytes)).strip()
+    except (ValueError, TypeError, PDFSyntaxError) as exc:
+        log.warning("Failed to extract text from PDF: %s", exc)
+        return ""
 
 
 class GoogleDriveConnector:
@@ -94,25 +118,29 @@ class GoogleDriveConnector:
         if source_id.startswith("folder:"):
             folder_id = source_id.removeprefix("folder:")
             docs: list[RawDocument] = []
-            await self._crawl_folder(folder_id, since, docs)
+            await self._crawl_folder(folder_id, since, docs, depth=0)
             return docs
         else:
             file_id = source_id.removeprefix("file:")
             return await self._fetch_single_file(file_id, since)
 
     async def _crawl_folder(
-        self, folder_id: str, since: datetime | None, docs: list[RawDocument]
+        self, folder_id: str, since: datetime | None, docs: list[RawDocument], *, depth: int
     ) -> None:
-        query_parts = [f"'{folder_id}' in parents", "trashed = false"]
-        if since:
-            query_parts.append(f"modifiedTime > '{since.isoformat()}'")
+        if depth >= MAX_FOLDER_DEPTH:
+            log.warning("Max folder depth (%d) reached at folder %s, stopping recursion", MAX_FOLDER_DEPTH, folder_id)
+            return
+
+        # Don't filter by modifiedTime in the query — subfolder modifiedTime
+        # doesn't reflect child changes. Check per-file instead.
+        query = f"'{folder_id}' in parents and trashed = false"
 
         page_token = None
         while True:
             result = await asyncio.to_thread(
                 lambda pt=page_token: self._service.files()
                 .list(
-                    q=" and ".join(query_parts),
+                    q=query,
                     fields="nextPageToken, files(id, name, mimeType, modifiedTime, size)",
                     pageSize=100,
                     pageToken=pt,
@@ -125,15 +153,24 @@ class GoogleDriveConnector:
 
                 # Recurse into subfolders
                 if mime == "application/vnd.google-apps.folder":
-                    await self._crawl_folder(file["id"], since, docs)
+                    await self._crawl_folder(file["id"], since, docs, depth=depth + 1)
                     continue
 
                 if mime in SKIP_MIMES:
                     continue
 
-                doc = await self._extract_document(file)
-                if doc:
-                    docs.append(doc)
+                # Check modifiedTime per-file for incremental sync
+                if since:
+                    modified = _parse_modified_time(file["modifiedTime"])
+                    if modified <= since:
+                        continue
+
+                try:
+                    doc = await self._extract_document(file)
+                    if doc:
+                        docs.append(doc)
+                except HttpError as exc:
+                    log.warning("Skipping file %s (%s): %s", file["name"], file["id"], exc)
 
             page_token = result.get("nextPageToken")
             if not page_token:
@@ -173,8 +210,11 @@ class GoogleDriveConnector:
             content = content_bytes.decode("utf-8", errors="replace").strip()
             if not content:
                 return None
+            url_template = SOURCE_URL_TEMPLATES.get(
+                mime, "https://docs.google.com/document/d/{file_id}"
+            )
             return RawDocument(
-                source_url=f"https://docs.google.com/document/d/{file_id}",
+                source_url=url_template.format(file_id=file_id),
                 content=content,
                 title=name,
                 date=modified,
@@ -186,6 +226,7 @@ class GoogleDriveConnector:
         if mime == "application/pdf":
             size = int(file.get("size", 0))
             if size > MAX_PDF_BYTES:
+                log.info("Skipping oversized PDF %s (%d bytes)", name, size)
                 return None
 
             content_bytes = await asyncio.to_thread(
@@ -207,14 +248,3 @@ class GoogleDriveConnector:
 
         # Other binary files — skip
         return None
-
-
-def _extract_pdf_text(pdf_bytes: bytes) -> str:
-    """Extract text from PDF bytes using pdfminer.six."""
-    from pdfminer.high_level import extract_text
-    import io
-
-    try:
-        return extract_text(io.BytesIO(pdf_bytes)).strip()
-    except Exception:
-        return ""
