@@ -4,7 +4,7 @@
 
 ## What This Is
 
-A centralized MCP server that indexes project artifacts from Notion, Slack, GitHub, Figma, Google Drive, and Atlassian (Jira) into a Supabase pgvector database, then serves semantic search results to any Claude interface (Code, Desktop, Cowork, claude.ai). Team members authenticate via Google Workspace SSO through Supabase Auth. Project configuration is pulled from VGV's existing Notion Project Hub pages — no admin UI needed.
+A centralized MCP server that indexes project artifacts from Notion, Slack, GitHub, Figma, Google Drive, and Atlassian (Jira) into a Pinecone vector database, then serves semantic search results (with Voyage.ai reranking) to any Claude interface (Code, Desktop, Cowork, claude.ai). Supabase handles auth and relational metadata. Team members authenticate via Google Workspace SSO through Supabase Auth. Project configuration is pulled from VGV's existing Notion Project Hub pages — no admin UI needed.
 
 ## Architecture
 
@@ -21,9 +21,9 @@ A centralized MCP server that indexes project artifacts from Notion, Slack, GitH
 │  (Docker container on VPS or Cloud Run)                 │
 │                                                         │
 │  ┌─────────────┐  ┌──────────────┐  ┌───────────────┐  │
-│  │ MCP Server   │  │ Ingestion    │  │ Embedding     │  │
-│  │ (query +     │  │ Scheduler    │  │ Engine        │  │
-│  │  auth)       │  │ (cron-based) │  │ (MiniLM-L6)   │  │
+│  │ MCP Server   │  │ Ingestion    │  │ Voyage.ai     │  │
+│  │ (query +     │  │ Scheduler    │  │ Embeddings    │  │
+│  │  auth)       │  │ (cron-based) │  │ + Reranker    │  │
 │  └──────┬──────┘  └──────┬───────┘  └───────────────┘  │
 │         │                │                              │
 │         ▼                ▼                              │
@@ -33,26 +33,30 @@ A centralized MCP server that indexes project artifacts from Notion, Slack, GitH
 │  │ Figma · Google Drive ·          │                    │
 │  │ Atlassian                       │                    │
 │  └─────────────────────────────────┘                    │
-└──────────────────────┬──────────────────────────────────┘
-                       │ SQL + pgvector
-                       ▼
-┌─────────────────────────────────────────────────────────┐
-│  Supabase                                               │
-│  PostgreSQL + pgvector (storage)                        │
-│  Supabase Auth + Google SSO (authentication)            │
-│  Dashboard (monitoring)                                 │
-└─────────────────────────────────────────────────────────┘
+└──────────┬──────────────────────────┬───────────────────┘
+           │ SQL (relational)         │ Vector ops
+           ▼                          ▼
+┌──────────────────────┐  ┌───────────────────────────────┐
+│  Supabase            │  │  Pinecone                     │
+│  PostgreSQL (auth,   │  │  Serverless vector DB         │
+│  projects, sources,  │  │  (namespace-per-project       │
+│  members)            │  │   isolation)                  │
+│  Supabase Auth +     │  │                               │
+│  Google SSO          │  │                               │
+└──────────────────────┘  └───────────────────────────────┘
 ```
 
 ## Tech Stack
 
 | Layer | Technology | Why |
 |---|---|---|
-| Language | TypeScript (Node.js) | MCP SDK is TypeScript-native; VGV has strong TS capability |
-| MCP Server | `@modelcontextprotocol/sdk` | Official MCP SDK for building servers |
-| Vector DB | Supabase (PostgreSQL + pgvector) | Free tier, managed, includes auth, REST API, dashboard |
+| Language | Python 3.12 | MCP SDK supports Python; strong ecosystem for ML/embedding libraries |
+| MCP Server | `mcp[cli]` | Official MCP SDK for building servers |
+| Vector DB | Pinecone (serverless) | Managed vector DB with namespace isolation, metadata filtering, scales to zero |
+| Relational DB | Supabase (PostgreSQL) | Auth, projects, sources, members — no vector storage |
 | Auth | Supabase Auth with Google OAuth | VGV Google Workspace SSO; no custom auth to build |
-| Embeddings | `@xenova/transformers` (all-MiniLM-L6-v2) | Runs locally in Node.js, no API costs, no data leaves the container |
+| Embeddings | Voyage.ai (`voyage-4-lite`, 1024-dim) | Cloud API, high-quality embeddings, asymmetric query/document types |
+| Reranking | Voyage.ai (`rerank-2-lite`) | Improves result relevance; graceful fallback on failure |
 | Connectors | Notion API, Slack API, GitHub API, Figma API, Google Drive API, Atlassian API | Direct API integrations; credentials stored as env vars |
 | Deployment | Docker | Runs on VPS (Hetzner/DO/Vultr) or Google Cloud Run |
 
@@ -63,39 +67,45 @@ vgv-project-rag/
 ├── CLAUDE.md                           ← This file (project instructions)
 ├── Dockerfile
 ├── docker-compose.yml                  ← For local dev and VPS deployment
-├── package.json
-├── tsconfig.json
+├── pyproject.toml
 ├── .env.example                        ← Template for required env vars
 ├── src/
-│   ├── index.ts                        ← Entry point: starts MCP server + scheduler
-│   ├── server/
-│   │   ├── mcp-server.ts              ← MCP tool definitions and handlers
-│   │   └── auth.ts                    ← Supabase Auth middleware (Google SSO)
-│   ├── ingestion/
-│   │   ├── scheduler.ts               ← Cron-based sync orchestrator
-│   │   ├── project-hub-parser.ts      ← Reads Notion Project Hub, extracts source URLs
-│   │   └── connectors/
-│   │       ├── notion.ts              ← Notion API: pages, databases, meeting notes
-│   │       ├── slack.ts               ← Slack API: channel messages, threads
-│   │       ├── github.ts             ← GitHub API: PRs, issues, ADRs, README
-│   │       ├── figma.ts              ← Figma API: component metadata, tokens
-│   │       ├── google_drive.py       ← Google Drive API: Docs, Slides, PDFs from shared folders
-│   │       └── atlassian.ts          ← Jira API: issues, sprints, comments
-│   ├── processing/
-│   │   ├── chunker.ts                 ← Semantic chunking by document type
-│   │   ├── embedder.ts                ← Embedding generation via transformers.js
-│   │   └── metadata.ts                ← Metadata extraction and tagging
-│   ├── storage/
-│   │   ├── supabase.ts                ← Supabase client, pgvector operations
-│   │   ├── migrations/
-│   │   │   └── 001_initial_schema.sql ← Tables, indexes, RLS policies
-│   │   └── queries.ts                 ← Search, insert, list, delete operations
-│   └── config/
-│       └── env.ts                      ← Typed env var access
+│   └── vgv_rag/
+│       ├── main.py                    ← Entry point: starts MCP server + scheduler
+│       ├── server/
+│       │   ├── mcp_server.py          ← MCP tool definitions and handlers
+│       │   ├── auth.py                ← Supabase Auth middleware (Google SSO)
+│       │   └── tools/
+│       │       ├── search.py          ← search_project_context handler
+│       │       ├── list_sources.py    ← list_sources handler
+│       │       └── ingest.py          ← ingest_document handler
+│       ├── ingestion/
+│       │   ├── scheduler.py           ← Cron-based sync orchestrator
+│       │   ├── project_hub_parser.py  ← Reads Notion Project Hub, extracts source URLs
+│       │   └── connectors/
+│       │       ├── notion.py          ← Notion API: pages, databases, meeting notes
+│       │       ├── slack.py           ← Slack API: channel messages, threads
+│       │       ├── github.py          ← GitHub API: PRs, issues, ADRs, README
+│       │       ├── figma.py           ← Figma API: component metadata, tokens
+│       │       ├── google_drive.py    ← Google Drive API: Docs, Slides, PDFs
+│       │       └── atlassian.py       ← Jira API: issues, sprints, comments
+│       ├── processing/
+│       │   ├── chunker.py             ← Semantic chunking by document type
+│       │   ├── embedder.py            ← Voyage.ai voyage-4-lite embeddings
+│       │   ├── reranker.py            ← Voyage.ai rerank-2-lite reranking
+│       │   └── metadata.py            ← Metadata extraction and tagging
+│       ├── storage/
+│       │   ├── client.py              ← Supabase client (service-role only)
+│       │   ├── supabase_queries.py    ← Relational operations (projects, sources, members)
+│       │   ├── pinecone_store.py      ← Vector operations (upsert, query, delete)
+│       │   └── migrations/
+│       │       ├── 001_initial_schema.sql ← Tables, indexes
+│       │       └── 002_remove_chunks.sql  ← Remove pgvector chunks table
+│       └── config/
+│           └── settings.py            ← Typed env var access via pydantic-settings
 ├── scripts/
-│   ├── setup-supabase.ts              ← Run migrations, enable pgvector
-│   └── seed-project.ts                ← CLI to onboard a project by Hub URL
-└── test/
+│   └── seed_project.py                ← CLI to onboard a project by Hub URL
+└── tests/
     └── ...
 ```
 
@@ -104,9 +114,6 @@ vgv-project-rag/
 ### Database Schema
 
 ```sql
--- Enable pgvector extension
-CREATE EXTENSION IF NOT EXISTS vector;
-
 -- Projects table (discovered from Notion Project Hubs)
 CREATE TABLE projects (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -122,7 +129,7 @@ CREATE TABLE projects (
 CREATE TABLE sources (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     project_id UUID REFERENCES projects(id) ON DELETE CASCADE,
-    connector TEXT NOT NULL,                  -- 'notion' | 'slack' | 'github' | 'figma' | 'atlassian'
+    connector TEXT NOT NULL,                  -- 'notion' | 'slack' | 'github' | 'figma' | 'google_drive' | 'atlassian'
     source_url TEXT NOT NULL,                 -- Original URL from Project Hub
     source_id TEXT NOT NULL,                  -- Connector-specific ID (channel ID, repo slug, etc.)
     last_synced_at TIMESTAMPTZ,
@@ -130,35 +137,6 @@ CREATE TABLE sources (
     sync_error TEXT,
     UNIQUE(project_id, connector, source_id)
 );
-
--- Chunks table with vector embeddings
-CREATE TABLE chunks (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    project_id UUID REFERENCES projects(id) ON DELETE CASCADE,
-    source_id UUID REFERENCES sources(id) ON DELETE CASCADE,
-    content TEXT NOT NULL,                    -- The chunk text
-    embedding VECTOR(384) NOT NULL,          -- all-MiniLM-L6-v2 produces 384-dim vectors
-    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-    -- metadata structure:
-    -- {
-    --   "artifact_type": "meeting_note" | "prd" | "story" | "design_spec" | "slack_thread" | "pr" | "adr" | ...,
-    --   "source_tool": "notion" | "slack" | "github" | "figma" | "atlassian",
-    --   "date": "2026-03-12T...",
-    --   "author": "...",
-    --   "phase": "pre-sales" | "design" | "sprint-1" | ...,
-    --   "source_url": "https://..."          -- Deep link back to original
-    -- }
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW()
-);
-
--- HNSW index for fast vector similarity search
-CREATE INDEX ON chunks USING hnsw (embedding vector_cosine_ops)
-    WITH (m = 16, ef_construction = 64);
-
--- Index for filtered queries (by project + artifact type)
-CREATE INDEX ON chunks (project_id, (metadata->>'artifact_type'));
-CREATE INDEX ON chunks (project_id, (metadata->>'source_tool'));
 
 -- Project team membership (for access control)
 CREATE TABLE project_members (
@@ -169,17 +147,11 @@ CREATE TABLE project_members (
     UNIQUE(project_id, user_email)
 );
 
--- Row Level Security: users can only query chunks from their projects
-ALTER TABLE chunks ENABLE ROW LEVEL SECURITY;
-
-CREATE POLICY "Users can read chunks from their projects"
-    ON chunks FOR SELECT
-    USING (
-        project_id IN (
-            SELECT project_id FROM project_members
-            WHERE user_email = auth.jwt()->>'email'
-        )
-    );
+-- NOTE: Vector storage (chunks + embeddings) is in Pinecone, not Supabase.
+-- Pinecone uses namespace-per-project isolation.
+-- Vector IDs follow {source_id}:{chunk_index} scheme.
+-- Chunk content is stored in Pinecone metadata alongside embeddings.
+-- Project membership is verified at the application layer before querying Pinecone.
 ```
 
 ### Supabase Auth Configuration
@@ -194,7 +166,7 @@ The auth flow from a user's perspective:
 2. On first query, the MCP server returns a `401` with a Supabase Auth URL
 3. User clicks the URL, authenticates with their VGV Google account
 4. Supabase issues a JWT; the MCP client caches it
-5. Subsequent queries include the JWT; the server validates it and scopes queries to the user's projects via RLS
+5. Subsequent queries include the JWT; the server validates it and verifies project membership before querying Pinecone
 
 ## MCP Server
 
@@ -265,11 +237,12 @@ The auth flow from a user's perspective:
 2. Validate JWT via Supabase Auth
 3. Extract user email from JWT
 4. Look up user's project memberships
-5. If project specified in query, verify membership
+5. If project specified in query, verify membership (security check)
 6. If project omitted, auto-detect from context (CLAUDE.md project identifier)
-7. Generate embedding for the query text
-8. Run pgvector similarity search with project_id filter (+ any additional filters)
-9. Return top-K chunks with metadata and source URLs
+7. Embed query via Voyage.ai (input_type="query", 1024-dim)
+8. Query Pinecone (namespace=project_id, top_k * 4 candidates, metadata filters)
+9. Rerank candidates via Voyage.ai rerank-2-lite → return top_k results
+10. Format results with metadata and source URLs
 ```
 
 ## Ingestion Layer
@@ -300,43 +273,38 @@ Steps:
 
 Each connector implements the same interface:
 
-```typescript
-interface Connector {
-    // Discover sources from parsed Project Hub config
-    discoverSources(config: ProjectConfig): Promise<Source[]>;
+```python
+@dataclass
+class RawDocument:
+    source_url: str             # Deep link back to original
+    content: str                # Raw text content
+    title: str
+    date: datetime
+    artifact_type: str          # meeting_note, prd, story, etc.
+    source_tool: str            # notion, slack, github, etc.
+    author: str | None = None
 
-    // Fetch documents from a source, optionally since a timestamp
-    fetchDocuments(source: Source, since?: Date): Promise<RawDocument[]>;
-}
-
-interface RawDocument {
-    sourceUrl: string;          // Deep link back to original
-    content: string;            // Raw text content
-    title: string;
-    author?: string;
-    date: Date;
-    artifactType: string;       // meeting_note, prd, story, etc.
-    sourceTool: string;         // notion, slack, github, etc.
-}
+class Connector(Protocol):
+    async def fetch_documents(self, source: Source, since: datetime | None) -> list[RawDocument]: ...
 ```
 
 ### Connector Details
 
 **Notion Connector**
-- Uses Notion API (`@notionhq/client`)
+- Uses Notion API (`notion-client`)
 - Fetches pages under the Project Hub and PHT entry
 - Detects artifact type from page title patterns and parent structure (e.g., pages under "Meeting Notes" database = meeting_note)
 - Incremental: filters by `last_edited_time > last_synced_at`
 
 **Slack Connector**
-- Uses Slack Web API (`@slack/web-api`)
+- Uses Slack Web API (`slack-sdk`)
 - Fetches messages from project channels listed in the Hub
 - Includes thread replies (each thread = one document)
 - Filters out bot messages, emoji-only reactions, join/leave messages
 - Incremental: uses `oldest` parameter with last sync timestamp
 
 **GitHub Connector**
-- Uses GitHub REST API (`@octokit/rest`)
+- Uses GitHub REST API (`PyGithub`)
 - Fetches: README.md, CLAUDE.md, AGENTS.md, ADR files, PR descriptions + review comments
 - Does NOT index source code (that's handled by agentic search in Claude Code)
 - Incremental: uses `since` parameter on PR/issue endpoints
@@ -364,63 +332,31 @@ interface RawDocument {
 
 ### Chunking Strategy
 
-```typescript
-// Chunking rules by document type
-const chunkingConfig = {
-    meeting_note: {
-        strategy: "by_heading",        // Split on H2/H3 headings (agenda items)
-        targetSize: 500,               // tokens
-        overlap: 50                    // token overlap between chunks
-    },
-    prd: {
-        strategy: "by_section",        // Split on H1/H2 sections
-        targetSize: 600,
-        overlap: 50
-    },
-    story: {
-        strategy: "whole_document",    // User stories are usually small enough to be one chunk
-        targetSize: 800,
-        overlap: 0
-    },
-    slack_thread: {
-        strategy: "whole_thread",      // One thread = one chunk
-        targetSize: 1000,
-        overlap: 0
-    },
-    pr: {
-        strategy: "by_section",        // PR description + each review comment as separate chunks
-        targetSize: 500,
-        overlap: 0
-    },
-    design_spec: {
-        strategy: "by_component",      // Each component = one chunk
-        targetSize: 400,
-        overlap: 0
-    },
-    issue: {
-        strategy: "whole_document",    // Jira issue = one chunk (summary + description + comments)
-        targetSize: 800,
-        overlap: 0
-    },
-    default: {
-        strategy: "recursive_split",   // Fallback: recursive character splitting
-        targetSize: 500,
-        overlap: 50
-    }
-};
+```python
+# Chunking rules by document type
+CHUNKING_CONFIG = {
+    "meeting_note": {"strategy": "by_heading", "target_size": 500, "overlap": 50},
+    "prd":          {"strategy": "by_section", "target_size": 600, "overlap": 50},
+    "story":        {"strategy": "whole_document", "target_size": 800, "overlap": 0},
+    "slack_thread": {"strategy": "whole_thread", "target_size": 1000, "overlap": 0},
+    "pr":           {"strategy": "by_section", "target_size": 500, "overlap": 0},
+    "design_spec":  {"strategy": "by_component", "target_size": 400, "overlap": 0},
+    "issue":        {"strategy": "whole_document", "target_size": 800, "overlap": 0},
+    "default":      {"strategy": "recursive_split", "target_size": 500, "overlap": 50},
+}
 ```
 
 ### Sync Scheduler
 
-```typescript
-// Cron schedule: run every 15 minutes during business hours, every hour otherwise
-// For each active project:
-//   1. Re-parse Project Hub (discover new/removed sources)
-//   2. For each source:
-//      a. Fetch documents modified since last sync
-//      b. Chunk and embed new/changed documents
-//      c. Upsert chunks in Supabase (delete old chunks for changed documents, insert new)
-//      d. Update source.last_synced_at and sync_status
+```
+Cron schedule: run every 15 minutes during business hours, every hour otherwise
+For each active project:
+  1. Re-parse Project Hub (discover new/removed sources)
+  2. For each source:
+     a. Fetch documents modified since last sync
+     b. Chunk and embed new/changed documents via Voyage.ai (input_type="document")
+     c. Upsert vectors to Pinecone by deterministic ID ({source_id}:{chunk_index})
+     d. Update source.last_synced_at and sync_status in Supabase
 ```
 
 ## Deployment
@@ -438,8 +374,7 @@ SUPABASE_ANON_KEY=eyJ...                # Anon key (used for client auth flow)
 # Connector credentials (org-level, managed by IT)
 NOTION_API_TOKEN=secret_...
 SLACK_BOT_TOKEN=xoxb-...
-GITHUB_APP_PRIVATE_KEY=...               # Or GITHUB_PAT
-GITHUB_APP_ID=...
+GITHUB_PAT=ghp_...
 FIGMA_API_TOKEN=figd_...
 ATLASSIAN_API_TOKEN=...
 ATLASSIAN_EMAIL=service-account@verygood.ventures
@@ -448,33 +383,39 @@ ATLASSIAN_DOMAIN=verygoodventures.atlassian.net
 # Google Drive
 GOOGLE_SERVICE_ACCOUNT_JSON=...          # Base64-encoded service account JSON key, or path to key file
 
+# Voyage.ai
+VOYAGE_API_KEY=pa-...
+
+# Pinecone
+PINECONE_API_KEY=pcsk_...
+PINECONE_INDEX_NAME=vgv-project-rag
+
 # Service config
 PORT=3000
 SYNC_CRON="*/15 8-20 * * 1-5"          # Every 15min during business hours, weekdays
-SYNC_CRON_OFF_HOURS="0 * * * *"         # Every hour otherwise
-LOG_LEVEL=info
+LOG_LEVEL=INFO
 ```
 
 ### Dockerfile
 
 ```dockerfile
-FROM node:20-slim
+FROM python:3.12-slim
 
 WORKDIR /app
 
-# Install dependencies
-COPY package.json package-lock.json ./
-RUN npm ci --production
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
-# Copy source
-COPY dist/ ./dist/
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev
 
-# The embedding model downloads on first run (~80MB) and caches
-ENV TRANSFORMERS_CACHE=/app/.cache/transformers
+COPY src/ ./src/
+COPY scripts/ ./scripts/
+
+ENV PYTHONPATH=/app/src
 
 EXPOSE 3000
 
-CMD ["node", "dist/index.js"]
+CMD ["uv", "run", "python", "-m", "vgv_rag.main"]
 ```
 
 ### Docker Compose (for VPS deployment)
@@ -488,17 +429,12 @@ services:
       - "3000:3000"
     env_file:
       - .env
-    volumes:
-      - transformer-cache:/app/.cache/transformers
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:3000/health')"]
       interval: 30s
       timeout: 5s
       retries: 3
-
-volumes:
-  transformer-cache:
 ```
 
 ### Google Cloud Run Deployment
@@ -520,13 +456,13 @@ gcloud run deploy vgv-project-rag \
   --set-env-vars "$(cat .env | tr '\n' ',')"
 ```
 
-Note: Cloud Run scales to zero between requests. The first request after idle has a cold start (~2-5 seconds for the container + embedding model load). Subsequent requests are fast. For the sync scheduler on Cloud Run, use Cloud Scheduler to trigger an HTTP endpoint on the service at the desired cron interval.
+Note: Cloud Run scales to zero between requests. The first request after idle has a cold start (~2-5 seconds for the container). Embeddings are generated via Voyage.ai API (no local model to load). For the sync scheduler on Cloud Run, use Cloud Scheduler to trigger an HTTP endpoint on the service at the desired cron interval.
 
 ## Onboarding a Project
 
 ```bash
 # CLI command to onboard a new project
-npx ts-node scripts/seed-project.ts \
+uv run python scripts/seed_project.py \
   --hub-url "https://www.notion.so/verygoodventures/ProjectName-Hub-abc123" \
   --name "Project Name"
 
@@ -556,7 +492,7 @@ Users do not need to be manually onboarded. The flow:
 2. On first query, the service redirects to Supabase Auth (Google SSO)
 3. User signs in with their `@verygood.ventures` Google account
 4. JWT is issued and cached by the MCP client
-5. Queries are automatically scoped to the user's projects via RLS
+5. Queries are automatically scoped to the user's projects via membership verification
 
 Project membership is derived from:
 - The `project_members` table (populated by the seed script or manually)
@@ -567,11 +503,11 @@ Project membership is derived from:
 Build in this sequence. Each step produces a testable, working increment.
 
 ### Phase 1: Foundation
-1. Initialize the repo: `package.json`, `tsconfig.json`, project structure
+1. Initialize the repo: `pyproject.toml`, project structure
 2. Set up Supabase: create project, run migrations (schema above), enable Google Auth
 3. Build the MCP server skeleton: health endpoint, auth middleware, empty tool handlers
-4. Build the embedding engine: `@xenova/transformers` wrapper that takes text and returns a 384-dim vector
-5. Build the storage layer: Supabase client, insert chunks, vector similarity search
+4. Build the embedding engine: Voyage.ai wrapper that takes text and returns a 1024-dim vector
+5. Build the storage layer: Supabase client (relational) + Pinecone client (vectors)
 6. Wire up `search_project_context` tool with a hardcoded test project and manually inserted chunks
 7. **Test:** Query the MCP server from Claude Code, verify auth flow and search results
 
@@ -580,27 +516,28 @@ Build in this sequence. Each step produces a testable, working increment.
 9. Build the Notion connector: fetch pages, detect artifact types, return RawDocuments
 10. Build the chunker: implement strategies per document type
 11. Build the sync scheduler: cron-based, calls connectors, chunks, embeds, stores
-12. Build the `seed-project.ts` CLI script
+12. Build the `seed_project.py` CLI script
 13. **Test:** Onboard a real project, verify Notion pages are indexed and searchable
 
 ### Phase 3: Connectors
 14. Slack connector
 15. GitHub connector
 16. Figma connector
-17. Atlassian connector
-18. **Test:** Full project index across all sources, verify cross-tool queries work
+17. Google Drive connector
+18. Atlassian connector
+19. **Test:** Full project index across all sources, verify cross-tool queries work
 
 ### Phase 4: Polish
-19. `list_sources` tool implementation
-20. `ingest_document` tool implementation
-21. Sync error handling, retry logic, stale source detection
-22. Dockerfile and deployment config (VPS or Cloud Run)
-23. **Test:** Deploy to staging, onboard a project, verify end-to-end from Claude Code/Desktop/Cowork
+20. `list_sources` tool implementation
+21. `ingest_document` tool implementation
+22. Sync error handling, retry logic, stale source detection
+23. Dockerfile and deployment config (VPS or Cloud Run)
+24. **Test:** Deploy to staging, onboard a project, verify end-to-end from Claude Code/Desktop/Cowork
 
 ## Key Design Decisions
 
-- **TypeScript, not Python:** MCP SDK is TypeScript-native. VGV's engineering team is strong in TS. Avoids a Python sidecar for embeddings by using `@xenova/transformers` (ONNX runtime in Node.js).
-- **Supabase, not a dedicated vector DB:** Supabase gives us pgvector + auth + dashboard in one managed service. At VGV's scale, pgvector performance is more than sufficient. Avoids running/paying for a separate Qdrant or Pinecone instance.
+- **Voyage.ai + Pinecone, not local embeddings + pgvector:** Cloud APIs eliminate the ~2GB torch dependency, dramatically shrink the Docker image, and provide higher-quality embeddings (voyage-4-lite, 1024-dim) with asymmetric query/document encoding. Pinecone's namespace isolation maps cleanly to project-per-namespace. Reranking via Voyage.ai rerank-2-lite improves result quality.
+- **Supabase for relational data only:** Auth, projects, sources, and members stay in Supabase. Vector storage moved to Pinecone for better performance and simpler scaling.
+- **Application-level membership checks:** With vectors in Pinecone (not Supabase), RLS no longer applies to search results. The search handler explicitly verifies project membership before querying Pinecone.
 - **Project Hub as config, not a yaml file:** Eliminates admin UI, leverages the PgM's existing workflow, and ensures the RAG config stays in sync with the team's actual tool landscape.
-- **RLS for access control, not application-level checks:** Row Level Security in PostgreSQL ensures that even a bug in the service layer can't leak cross-project data. The database enforces the boundary.
 - **Agentic search for code, RAG for project knowledge:** The service deliberately does NOT index source code. Claude Code's native grep/glob/file-read approach handles code better. This service handles the distributed, unstructured, multi-tool project knowledge that agentic search can't reach.

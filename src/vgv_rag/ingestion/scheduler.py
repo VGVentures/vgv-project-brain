@@ -1,15 +1,14 @@
 import logging
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from vgv_rag.storage.queries import (
+from vgv_rag.storage.supabase_queries import (
     update_source_sync_status,
-    delete_chunks_by_source,
-    insert_chunks,
     list_sources_for_project,
 )
+from vgv_rag.storage.pinecone_store import upsert_vectors, build_vector_id
 from vgv_rag.processing.chunker import chunk
 from vgv_rag.processing.embedder import embed_batch
 from vgv_rag.processing.metadata import build_chunk_metadata
-from vgv_rag.ingestion.connectors.types import Source, Connector
+from vgv_rag.ingestion.connectors.types import Source
 
 log = logging.getLogger(__name__)
 
@@ -18,24 +17,26 @@ async def sync_source(source: Source, connector) -> None:
     await update_source_sync_status(source.id, "syncing")
     try:
         docs = await connector.fetch_documents(source, source.last_synced_at)
-        await delete_chunks_by_source(source.id)
-
+        # Upsert-by-ID: deterministic vector IDs ({source_id}:{chunk_index})
+        # make upserts idempotent — no need to delete first, preventing data
+        # loss when incremental sync returns only recently modified docs.
+        # Use a running offset so IDs don't collide across docs in the same source.
+        chunk_offset = 0
         for doc in docs:
             chunks = chunk(doc.content, doc.artifact_type)
             if not chunks:
                 continue
             embeddings = await embed_batch(chunks)
-            rows = [
+            vectors = [
                 {
-                    "project_id": source.project_id,
-                    "source_id": source.id,
-                    "content": text,
-                    "embedding": embeddings[i],
-                    "metadata": build_chunk_metadata(doc, i),
+                    "id": build_vector_id(source.id, chunk_offset + i),
+                    "values": embeddings[i],
+                    "metadata": build_chunk_metadata(doc, i, text),
                 }
                 for i, text in enumerate(chunks)
             ]
-            await insert_chunks(rows)
+            await upsert_vectors(namespace=source.project_id, vectors=vectors)
+            chunk_offset += len(chunks)
 
         await update_source_sync_status(source.id, "success")
         log.info("Synced source %s (%s)", source.id, source.connector)
@@ -44,12 +45,6 @@ async def sync_source(source: Source, connector) -> None:
         msg = str(exc)
         log.error("Sync failed for source %s: %s", source.id, msg)
         await update_source_sync_status(source.id, "error", msg)
-
-
-def is_business_hours() -> bool:
-    from datetime import datetime
-    now = datetime.now()
-    return 1 <= now.isoweekday() <= 5 and 8 <= now.hour <= 20
 
 
 def start_scheduler(get_connector) -> AsyncIOScheduler:

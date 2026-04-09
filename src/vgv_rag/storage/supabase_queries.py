@@ -4,40 +4,6 @@ from typing import Any
 from vgv_rag.storage.client import get_client
 
 
-async def insert_chunks(chunks: list[dict[str, Any]]) -> None:
-    client = get_client()
-    result = await asyncio.to_thread(
-        lambda: client.table("chunks").insert(chunks).execute()
-    )
-    if hasattr(result, "error") and result.error:
-        raise RuntimeError(f"insert_chunks failed: {result.error}")
-
-
-async def delete_chunks_by_source(source_id: str) -> None:
-    client = get_client()
-    await asyncio.to_thread(
-        lambda: client.table("chunks").delete().eq("source_id", source_id).execute()
-    )
-
-
-async def search_chunks(
-    embedding: list[float],
-    project_id: str,
-    top_k: int = 5,
-    filter_metadata: dict | None = None,
-) -> list[dict]:
-    client = get_client()
-    result = await asyncio.to_thread(
-        lambda: client.rpc("match_chunks", {
-            "query_embedding": embedding,
-            "match_project_id": project_id,
-            "match_count": top_k,
-            "filter_metadata": filter_metadata,
-        }).execute()
-    )
-    return result.data or []
-
-
 async def upsert_project(name: str, notion_hub_url: str, config: dict | None = None) -> str:
     client = get_client()
     result = await asyncio.to_thread(
