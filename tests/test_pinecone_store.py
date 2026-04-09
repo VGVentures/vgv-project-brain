@@ -34,6 +34,9 @@ async def test_query_vectors(mock_pinecone):
     assert len(results) == 1
     assert results[0]["content"] == "hello"
     assert results[0]["score"] == 0.92
+    # Verify metadata split: content extracted, other fields in metadata dict
+    assert "content" not in results[0]["metadata"]
+    assert results[0]["metadata"]["artifact_type"] == "prd"
 
 
 @pytest.mark.asyncio

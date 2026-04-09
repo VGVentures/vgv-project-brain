@@ -69,13 +69,15 @@ async def test_search_rejects_non_member(mocker):
 
 
 @pytest.mark.asyncio
-async def test_search_auto_detects_project(mocker):
-    """When no project is specified, auto-detect from user's memberships."""
-    from vgv_rag.server.tools.search import handle_search_project_context
+async def test_search_auto_detects_project_and_queries_correct_namespace(mocker):
+    """When no project is specified, auto-detect and query the correct Pinecone namespace."""
+    from vgv_rag.server.tools.search import handle_search_project_context, query_vectors
 
-    result = await handle_search_project_context(
+    await handle_search_project_context(
         query="how does auth work",
         user_email="alice@verygood.ventures",
     )
 
-    assert "PRD section about auth" in result
+    # Should query with the auto-detected project's ID as namespace
+    call_kwargs = query_vectors.call_args.kwargs
+    assert call_kwargs["namespace"] == "proj-1"

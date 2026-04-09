@@ -4,7 +4,7 @@ from vgv_rag.storage.supabase_queries import (
     update_source_sync_status,
     list_sources_for_project,
 )
-from vgv_rag.storage.pinecone_store import upsert_vectors, delete_by_source, build_vector_id
+from vgv_rag.storage.pinecone_store import upsert_vectors, build_vector_id
 from vgv_rag.processing.chunker import chunk
 from vgv_rag.processing.embedder import embed_batch
 from vgv_rag.processing.metadata import build_chunk_metadata
@@ -17,8 +17,9 @@ async def sync_source(source: Source, connector) -> None:
     await update_source_sync_status(source.id, "syncing")
     try:
         docs = await connector.fetch_documents(source, source.last_synced_at)
-        await delete_by_source(namespace=source.project_id, source_id=source.id)
-
+        # Upsert-by-ID: deterministic vector IDs ({source_id}:{chunk_index})
+        # make upserts idempotent — no need to delete first, preventing data
+        # loss when incremental sync returns only recently modified docs.
         for doc in docs:
             chunks = chunk(doc.content, doc.artifact_type)
             if not chunks:

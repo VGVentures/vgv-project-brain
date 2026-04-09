@@ -3,7 +3,7 @@ import httpx
 from vgv_rag.processing.embedder import embed_batch
 from vgv_rag.processing.chunker import chunk
 from vgv_rag.processing.metadata import build_chunk_metadata
-from vgv_rag.storage.supabase_queries import upsert_source, get_project_by_name
+from vgv_rag.storage.supabase_queries import upsert_source, get_project_by_name, list_projects_for_user
 from vgv_rag.storage.pinecone_store import upsert_vectors, build_vector_id
 from vgv_rag.ingestion.connectors.types import RawDocument
 from datetime import datetime, timezone
@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 
 async def handle_ingest_document(
     project: str,
+    user_email: str,
     content: str = "",
     url: str = "",
     artifact_type: str = "document",
@@ -21,6 +22,11 @@ async def handle_ingest_document(
     proj = await get_project_by_name(project)
     if not proj:
         return f"Project not found: {project}"
+
+    # Verify membership
+    user_projects = await list_projects_for_user(user_email)
+    if proj["id"] not in [p["id"] for p in user_projects]:
+        return "Not authorized: you are not a member of this project."
 
     text = content
     if url and not content:
