@@ -4,7 +4,7 @@
 
 ## What This Is
 
-A centralized MCP server that indexes project artifacts from Notion, Slack, GitHub, Figma, and Atlassian (Jira) into a Supabase pgvector database, then serves semantic search results to any Claude interface (Code, Desktop, Cowork, claude.ai). Team members authenticate via Google Workspace SSO through Supabase Auth. Project configuration is pulled from VGV's existing Notion Project Hub pages — no admin UI needed.
+A centralized MCP server that indexes project artifacts from Notion, Slack, GitHub, Figma, Google Drive, and Atlassian (Jira) into a Supabase pgvector database, then serves semantic search results to any Claude interface (Code, Desktop, Cowork, claude.ai). Team members authenticate via Google Workspace SSO through Supabase Auth. Project configuration is pulled from VGV's existing Notion Project Hub pages — no admin UI needed.
 
 ## Architecture
 
@@ -30,7 +30,8 @@ A centralized MCP server that indexes project artifacts from Notion, Slack, GitH
 │  ┌─────────────────────────────────┐                    │
 │  │ Connector Layer                 │                    │
 │  │ Notion · Slack · GitHub ·       │                    │
-│  │ Figma · Atlassian               │                    │
+│  │ Figma · Google Drive ·          │                    │
+│  │ Atlassian                       │                    │
 │  └─────────────────────────────────┘                    │
 └──────────────────────┬──────────────────────────────────┘
                        │ SQL + pgvector
@@ -52,7 +53,7 @@ A centralized MCP server that indexes project artifacts from Notion, Slack, GitH
 | Vector DB | Supabase (PostgreSQL + pgvector) | Free tier, managed, includes auth, REST API, dashboard |
 | Auth | Supabase Auth with Google OAuth | VGV Google Workspace SSO; no custom auth to build |
 | Embeddings | `@xenova/transformers` (all-MiniLM-L6-v2) | Runs locally in Node.js, no API costs, no data leaves the container |
-| Connectors | Notion API, Slack API, GitHub API, Figma API, Atlassian API | Direct API integrations; credentials stored as env vars |
+| Connectors | Notion API, Slack API, GitHub API, Figma API, Google Drive API, Atlassian API | Direct API integrations; credentials stored as env vars |
 | Deployment | Docker | Runs on VPS (Hetzner/DO/Vultr) or Google Cloud Run |
 
 ## Project Structure
@@ -78,6 +79,7 @@ vgv-project-rag/
 │   │       ├── slack.ts               ← Slack API: channel messages, threads
 │   │       ├── github.ts             ← GitHub API: PRs, issues, ADRs, README
 │   │       ├── figma.ts              ← Figma API: component metadata, tokens
+│   │       ├── google_drive.py       ← Google Drive API: Docs, Slides, PDFs from shared folders
 │   │       └── atlassian.ts          ← Jira API: issues, sprints, comments
 │   ├── processing/
 │   │   ├── chunker.ts                 ← Semantic chunking by document type
@@ -345,6 +347,15 @@ interface RawDocument {
 - Lightweight — structured metadata only, not pixel data
 - Full resync on each cycle (Figma doesn't have great incremental support)
 
+**Google Drive Connector**
+- Uses Google Drive API v3 (`google-api-python-client`) with GCP service account auth
+- Discovers sources from Project Hub "Helpful Links" (folder URLs → recursive crawl, doc/slides URLs → individual fetch)
+- Exports Google Docs and Slides to plain text via `files.export`
+- Extracts text from PDFs (≤10 MB) via `pdfminer.six`
+- Google Sheets are explicitly deferred (skipped)
+- Incremental: filters by `modifiedTime > last_synced_at`
+- Service account must be shared on target folders/docs to access them
+
 **Atlassian (Jira) Connector**
 - Uses Jira REST API
 - Fetches: issues (summary, description, comments), sprint data, epic descriptions
@@ -433,6 +444,9 @@ FIGMA_API_TOKEN=figd_...
 ATLASSIAN_API_TOKEN=...
 ATLASSIAN_EMAIL=service-account@verygood.ventures
 ATLASSIAN_DOMAIN=verygoodventures.atlassian.net
+
+# Google Drive
+GOOGLE_SERVICE_ACCOUNT_JSON=...          # Base64-encoded service account JSON key, or path to key file
 
 # Service config
 PORT=3000
