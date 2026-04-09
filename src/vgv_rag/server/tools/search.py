@@ -1,5 +1,9 @@
 from vgv_rag.processing.embedder import embed
-from vgv_rag.storage.queries import search_chunks, list_projects_for_user, get_project_by_name
+from vgv_rag.processing.reranker import rerank
+from vgv_rag.storage.supabase_queries import list_projects_for_user, get_project_by_name
+from vgv_rag.storage.pinecone_store import query_vectors
+
+RERANK_CANDIDATE_MULTIPLIER = 4
 
 
 async def handle_search_project_context(
@@ -21,28 +25,41 @@ async def handle_search_project_context(
             return "No projects found for your account."
         project_id = projects[0]["id"]
 
+    # Verify membership
+    user_projects = await list_projects_for_user(user_email)
+    if project_id not in [p["id"] for p in user_projects]:
+        return f"Not authorized: you are not a member of this project."
+
     # Build metadata filter
     filter_meta: dict | None = None
     if filters:
         filter_meta = {k: v for k, v in filters.items() if v} or None
 
     # Embed and search
+    top_k = min(top_k, 20)
     vector = await embed(query)
-    chunks = await search_chunks(
+    candidates = await query_vectors(
+        namespace=project_id,
         embedding=vector,
-        project_id=project_id,
-        top_k=min(top_k, 20),
-        filter_metadata=filter_meta,
+        top_k=top_k * RERANK_CANDIDATE_MULTIPLIER,
+        filters=filter_meta,
     )
 
-    if not chunks:
+    if not candidates:
+        return "No relevant results found."
+
+    # Rerank
+    results = await rerank(query, candidates, top_k=top_k)
+
+    if not results:
         return "No relevant results found."
 
     lines = []
-    for i, c in enumerate(chunks, 1):
+    for i, c in enumerate(results, 1):
         meta = c.get("metadata", {})
-        pct = f"{c['similarity'] * 100:.0f}%"
-        lines.append(f"--- Result {i} (similarity: {pct}) ---")
+        score = c.get("relevance_score", c.get("score", 0))
+        pct = f"{score * 100:.0f}%"
+        lines.append(f"--- Result {i} (relevance: {pct}) ---")
         lines.append(f"Source: {meta.get('source_tool', 'unknown')} | Type: {meta.get('artifact_type', 'unknown')}")
         if meta.get("source_url"):
             lines.append(f"URL: {meta['source_url']}")
