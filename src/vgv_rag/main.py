@@ -50,6 +50,7 @@ def create_app() -> Starlette:
     async def on_startup():
         from vgv_rag.config.settings import settings
         from vgv_rag.storage.migrate import check_schema
+        from vgv_rag.storage.pinecone_store import verify_index
         if not await check_schema(settings.supabase_url):
             project_ref = settings.supabase_url.split("//")[1].split(".")[0]
             log.error(
@@ -58,6 +59,8 @@ def create_app() -> Starlette:
                 "Paste the contents of: src/vgv_rag/storage/migrations/001_initial_schema.sql",
                 project_ref,
             )
+        if not await verify_index():
+            log.error("Pinecone index not found or not accessible. Check PINECONE_API_KEY and PINECONE_INDEX_NAME.")
         registry = build_connector_registry()
         start_scheduler(registry.get)
 

@@ -13,7 +13,6 @@ RUN uv sync --frozen --no-dev
 COPY src/ ./src/
 COPY scripts/ ./scripts/
 
-ENV SENTENCE_TRANSFORMERS_HOME=/app/.cache/sentence-transformers
 ENV PYTHONPATH=/app/src
 
 EXPOSE 3000

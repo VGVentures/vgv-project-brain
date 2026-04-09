@@ -6,14 +6,9 @@ services:
       - "3002:3002"
     env_file:
       - .env
-    volumes:
-      - model-cache:/app/.cache/sentence-transformers
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:3000/health')"]
       interval: 30s
       timeout: 5s
       retries: 3
-
-volumes:
-  model-cache:

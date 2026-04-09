@@ -1,5 +1,5 @@
 # src/vgv_rag/server/tools/list_sources.py
-from vgv_rag.storage.queries import list_sources_for_project, get_project_by_name, list_projects_for_user
+from vgv_rag.storage.supabase_queries import list_sources_for_project, get_project_by_name, list_projects_for_user
 
 
 async def handle_list_sources(project: str, user_email: str) -> str:

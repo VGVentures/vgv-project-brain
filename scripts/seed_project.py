@@ -10,7 +10,7 @@ from vgv_rag.ingestion.project_hub_parser import parse_project_hub
 from vgv_rag.ingestion.connectors.notion import NotionConnector
 from vgv_rag.ingestion.connectors.types import Source
 from vgv_rag.ingestion.scheduler import sync_source
-from vgv_rag.storage.queries import upsert_project, upsert_source
+from vgv_rag.storage.supabase_queries import upsert_project, upsert_source
 from vgv_rag.storage.client import get_client
 from vgv_rag.config.settings import settings
 
