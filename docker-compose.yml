@@ -3,7 +3,7 @@ services:
   rag-service:
     build: .
     ports:
-      - "3002:3002"
+      - "3000:3000"
     env_file:
       - .env
     restart: unless-stopped

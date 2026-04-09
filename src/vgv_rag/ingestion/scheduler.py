@@ -20,6 +20,8 @@ async def sync_source(source: Source, connector) -> None:
         # Upsert-by-ID: deterministic vector IDs ({source_id}:{chunk_index})
         # make upserts idempotent — no need to delete first, preventing data
         # loss when incremental sync returns only recently modified docs.
+        # Use a running offset so IDs don't collide across docs in the same source.
+        chunk_offset = 0
         for doc in docs:
             chunks = chunk(doc.content, doc.artifact_type)
             if not chunks:
@@ -27,13 +29,14 @@ async def sync_source(source: Source, connector) -> None:
             embeddings = await embed_batch(chunks)
             vectors = [
                 {
-                    "id": build_vector_id(source.id, i),
+                    "id": build_vector_id(source.id, chunk_offset + i),
                     "values": embeddings[i],
                     "metadata": build_chunk_metadata(doc, i, text),
                 }
                 for i, text in enumerate(chunks)
             ]
             await upsert_vectors(namespace=source.project_id, vectors=vectors)
+            chunk_offset += len(chunks)
 
         await update_source_sync_status(source.id, "success")
         log.info("Synced source %s (%s)", source.id, source.connector)

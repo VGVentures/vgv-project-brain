@@ -273,43 +273,38 @@ Steps:
 
 Each connector implements the same interface:
 
-```typescript
-interface Connector {
-    // Discover sources from parsed Project Hub config
-    discoverSources(config: ProjectConfig): Promise<Source[]>;
+```python
+@dataclass
+class RawDocument:
+    source_url: str             # Deep link back to original
+    content: str                # Raw text content
+    title: str
+    date: datetime
+    artifact_type: str          # meeting_note, prd, story, etc.
+    source_tool: str            # notion, slack, github, etc.
+    author: str | None = None
 
-    // Fetch documents from a source, optionally since a timestamp
-    fetchDocuments(source: Source, since?: Date): Promise<RawDocument[]>;
-}
-
-interface RawDocument {
-    sourceUrl: string;          // Deep link back to original
-    content: string;            // Raw text content
-    title: string;
-    author?: string;
-    date: Date;
-    artifactType: string;       // meeting_note, prd, story, etc.
-    sourceTool: string;         // notion, slack, github, etc.
-}
+class Connector(Protocol):
+    async def fetch_documents(self, source: Source, since: datetime | None) -> list[RawDocument]: ...
 ```
 
 ### Connector Details
 
 **Notion Connector**
-- Uses Notion API (`@notionhq/client`)
+- Uses Notion API (`notion-client`)
 - Fetches pages under the Project Hub and PHT entry
 - Detects artifact type from page title patterns and parent structure (e.g., pages under "Meeting Notes" database = meeting_note)
 - Incremental: filters by `last_edited_time > last_synced_at`
 
 **Slack Connector**
-- Uses Slack Web API (`@slack/web-api`)
+- Uses Slack Web API (`slack-sdk`)
 - Fetches messages from project channels listed in the Hub
 - Includes thread replies (each thread = one document)
 - Filters out bot messages, emoji-only reactions, join/leave messages
 - Incremental: uses `oldest` parameter with last sync timestamp
 
 **GitHub Connector**
-- Uses GitHub REST API (`@octokit/rest`)
+- Uses GitHub REST API (`PyGithub`)
 - Fetches: README.md, CLAUDE.md, AGENTS.md, ADR files, PR descriptions + review comments
 - Does NOT index source code (that's handled by agentic search in Claude Code)
 - Incremental: uses `since` parameter on PR/issue endpoints
@@ -337,50 +332,18 @@ interface RawDocument {
 
 ### Chunking Strategy
 
-```typescript
-// Chunking rules by document type
-const chunkingConfig = {
-    meeting_note: {
-        strategy: "by_heading",        // Split on H2/H3 headings (agenda items)
-        targetSize: 500,               // tokens
-        overlap: 50                    // token overlap between chunks
-    },
-    prd: {
-        strategy: "by_section",        // Split on H1/H2 sections
-        targetSize: 600,
-        overlap: 50
-    },
-    story: {
-        strategy: "whole_document",    // User stories are usually small enough to be one chunk
-        targetSize: 800,
-        overlap: 0
-    },
-    slack_thread: {
-        strategy: "whole_thread",      // One thread = one chunk
-        targetSize: 1000,
-        overlap: 0
-    },
-    pr: {
-        strategy: "by_section",        // PR description + each review comment as separate chunks
-        targetSize: 500,
-        overlap: 0
-    },
-    design_spec: {
-        strategy: "by_component",      // Each component = one chunk
-        targetSize: 400,
-        overlap: 0
-    },
-    issue: {
-        strategy: "whole_document",    // Jira issue = one chunk (summary + description + comments)
-        targetSize: 800,
-        overlap: 0
-    },
-    default: {
-        strategy: "recursive_split",   // Fallback: recursive character splitting
-        targetSize: 500,
-        overlap: 50
-    }
-};
+```python
+# Chunking rules by document type
+CHUNKING_CONFIG = {
+    "meeting_note": {"strategy": "by_heading", "target_size": 500, "overlap": 50},
+    "prd":          {"strategy": "by_section", "target_size": 600, "overlap": 50},
+    "story":        {"strategy": "whole_document", "target_size": 800, "overlap": 0},
+    "slack_thread": {"strategy": "whole_thread", "target_size": 1000, "overlap": 0},
+    "pr":           {"strategy": "by_section", "target_size": 500, "overlap": 0},
+    "design_spec":  {"strategy": "by_component", "target_size": 400, "overlap": 0},
+    "issue":        {"strategy": "whole_document", "target_size": 800, "overlap": 0},
+    "default":      {"strategy": "recursive_split", "target_size": 500, "overlap": 50},
+}
 ```
 
 ### Sync Scheduler
@@ -392,7 +355,7 @@ For each active project:
   2. For each source:
      a. Fetch documents modified since last sync
      b. Chunk and embed new/changed documents via Voyage.ai (input_type="document")
-     c. Delete old vectors from Pinecone by source prefix, upsert new vectors
+     c. Upsert vectors to Pinecone by deterministic ID ({source_id}:{chunk_index})
      d. Update source.last_synced_at and sync_status in Supabase
 ```
 
@@ -463,7 +426,7 @@ services:
   rag-service:
     build: .
     ports:
-      - "3002:3002"
+      - "3000:3000"
     env_file:
       - .env
     restart: unless-stopped
@@ -499,7 +462,7 @@ Note: Cloud Run scales to zero between requests. The first request after idle ha
 
 ```bash
 # CLI command to onboard a new project
-npx ts-node scripts/seed-project.ts \
+uv run python scripts/seed_project.py \
   --hub-url "https://www.notion.so/verygoodventures/ProjectName-Hub-abc123" \
   --name "Project Name"
 
@@ -529,7 +492,7 @@ Users do not need to be manually onboarded. The flow:
 2. On first query, the service redirects to Supabase Auth (Google SSO)
 3. User signs in with their `@verygood.ventures` Google account
 4. JWT is issued and cached by the MCP client
-5. Queries are automatically scoped to the user's projects via RLS
+5. Queries are automatically scoped to the user's projects via membership verification
 
 Project membership is derived from:
 - The `project_members` table (populated by the seed script or manually)
@@ -540,11 +503,11 @@ Project membership is derived from:
 Build in this sequence. Each step produces a testable, working increment.
 
 ### Phase 1: Foundation
-1. Initialize the repo: `package.json`, `tsconfig.json`, project structure
+1. Initialize the repo: `pyproject.toml`, project structure
 2. Set up Supabase: create project, run migrations (schema above), enable Google Auth
 3. Build the MCP server skeleton: health endpoint, auth middleware, empty tool handlers
-4. Build the embedding engine: `@xenova/transformers` wrapper that takes text and returns a 384-dim vector
-5. Build the storage layer: Supabase client, insert chunks, vector similarity search
+4. Build the embedding engine: Voyage.ai wrapper that takes text and returns a 1024-dim vector
+5. Build the storage layer: Supabase client (relational) + Pinecone client (vectors)
 6. Wire up `search_project_context` tool with a hardcoded test project and manually inserted chunks
 7. **Test:** Query the MCP server from Claude Code, verify auth flow and search results
 
@@ -553,22 +516,23 @@ Build in this sequence. Each step produces a testable, working increment.
 9. Build the Notion connector: fetch pages, detect artifact types, return RawDocuments
 10. Build the chunker: implement strategies per document type
 11. Build the sync scheduler: cron-based, calls connectors, chunks, embeds, stores
-12. Build the `seed-project.ts` CLI script
+12. Build the `seed_project.py` CLI script
 13. **Test:** Onboard a real project, verify Notion pages are indexed and searchable
 
 ### Phase 3: Connectors
 14. Slack connector
 15. GitHub connector
 16. Figma connector
-17. Atlassian connector
-18. **Test:** Full project index across all sources, verify cross-tool queries work
+17. Google Drive connector
+18. Atlassian connector
+19. **Test:** Full project index across all sources, verify cross-tool queries work
 
 ### Phase 4: Polish
-19. `list_sources` tool implementation
-20. `ingest_document` tool implementation
-21. Sync error handling, retry logic, stale source detection
-22. Dockerfile and deployment config (VPS or Cloud Run)
-23. **Test:** Deploy to staging, onboard a project, verify end-to-end from Claude Code/Desktop/Cowork
+20. `list_sources` tool implementation
+21. `ingest_document` tool implementation
+22. Sync error handling, retry logic, stale source detection
+23. Dockerfile and deployment config (VPS or Cloud Run)
+24. **Test:** Deploy to staging, onboard a project, verify end-to-end from Claude Code/Desktop/Cowork
 
 ## Key Design Decisions
 
