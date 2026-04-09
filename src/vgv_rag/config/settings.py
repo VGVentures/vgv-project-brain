@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     atlassian_api_token: Optional[str] = None
     atlassian_email: Optional[str] = None
     atlassian_domain: Optional[str] = None
+    google_service_account_json: Optional[str] = None  # Base64-encoded JSON key or file path
 
     # Service
     port: int = 3000
