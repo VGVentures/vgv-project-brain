@@ -7,15 +7,15 @@ from vgv_rag.ingestion.connectors.types import Source, RawDocument
 @pytest.fixture(autouse=True)
 def mock_storage(mocker):
     mocker.patch("vgv_rag.ingestion.scheduler.update_source_sync_status", new_callable=AsyncMock)
-    mocker.patch("vgv_rag.ingestion.scheduler.delete_chunks_by_source", new_callable=AsyncMock)
-    mocker.patch("vgv_rag.ingestion.scheduler.insert_chunks", new_callable=AsyncMock)
-    mocker.patch("vgv_rag.ingestion.scheduler.embed_batch", new_callable=AsyncMock, return_value=[[0.0] * 384])
+    mocker.patch("vgv_rag.ingestion.scheduler.delete_by_source", new_callable=AsyncMock)
+    mocker.patch("vgv_rag.ingestion.scheduler.upsert_vectors", new_callable=AsyncMock)
+    mocker.patch("vgv_rag.ingestion.scheduler.embed_batch", new_callable=AsyncMock, return_value=[[0.0] * 1024])
 
 
 @pytest.mark.asyncio
-async def test_sync_source_deletes_old_and_inserts_new(mocker):
+async def test_sync_source_deletes_old_and_upserts_new(mocker):
     from vgv_rag.ingestion.scheduler import sync_source
-    from vgv_rag.ingestion.scheduler import delete_chunks_by_source, insert_chunks
+    from vgv_rag.ingestion.scheduler import delete_by_source, upsert_vectors
 
     mock_connector = MagicMock()
     mock_connector.fetch_documents = AsyncMock(return_value=[
@@ -36,8 +36,10 @@ async def test_sync_source_deletes_old_and_inserts_new(mocker):
 
     await sync_source(source=source, connector=mock_connector)
 
-    delete_chunks_by_source.assert_called_once_with("src-1")
-    insert_chunks.assert_called_once()
+    delete_by_source.assert_called_once_with(namespace="proj-1", source_id="src-1")
+    upsert_vectors.assert_called_once()
+    call_kwargs = upsert_vectors.call_args.kwargs
+    assert call_kwargs["namespace"] == "proj-1"
 
 
 @pytest.mark.asyncio

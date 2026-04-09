@@ -1,11 +1,10 @@
 import logging
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from vgv_rag.storage.queries import (
+from vgv_rag.storage.supabase_queries import (
     update_source_sync_status,
-    delete_chunks_by_source,
-    insert_chunks,
     list_sources_for_project,
 )
+from vgv_rag.storage.pinecone_store import upsert_vectors, delete_by_source, build_vector_id
 from vgv_rag.processing.chunker import chunk
 from vgv_rag.processing.embedder import embed_batch
 from vgv_rag.processing.metadata import build_chunk_metadata
@@ -18,24 +17,22 @@ async def sync_source(source: Source, connector) -> None:
     await update_source_sync_status(source.id, "syncing")
     try:
         docs = await connector.fetch_documents(source, source.last_synced_at)
-        await delete_chunks_by_source(source.id)
+        await delete_by_source(namespace=source.project_id, source_id=source.id)
 
         for doc in docs:
             chunks = chunk(doc.content, doc.artifact_type)
             if not chunks:
                 continue
             embeddings = await embed_batch(chunks)
-            rows = [
+            vectors = [
                 {
-                    "project_id": source.project_id,
-                    "source_id": source.id,
-                    "content": text,
-                    "embedding": embeddings[i],
-                    "metadata": build_chunk_metadata(doc, i),
+                    "id": build_vector_id(source.id, i),
+                    "values": embeddings[i],
+                    "metadata": build_chunk_metadata(doc, i, text),
                 }
                 for i, text in enumerate(chunks)
             ]
-            await insert_chunks(rows)
+            await upsert_vectors(namespace=source.project_id, vectors=vectors)
 
         await update_source_sync_status(source.id, "success")
         log.info("Synced source %s (%s)", source.id, source.connector)
