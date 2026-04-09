@@ -90,6 +90,8 @@ async def test_parses_jira_project(mock_notion):
     ("https://docs.google.com/presentation/d/1aBcDeFgHiJkLmNoPqRsT/edit", "google_drive_docs"),
     # Direct file link
     ("https://drive.google.com/file/d/1aBcDeFgHiJkLmNoPqRsT/view", "google_drive_docs"),
+    # open?id= format
+    ("https://drive.google.com/open?id=1aBcDeFgHiJkLmNoPqRsT", "google_drive_docs"),
 ])
 def test_classify_google_urls(url, field):
     from vgv_rag.ingestion.connectors.types import ProjectConfig

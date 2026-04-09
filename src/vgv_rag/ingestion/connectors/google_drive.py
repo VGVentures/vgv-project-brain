@@ -57,6 +57,10 @@ def _extract_folder_id(url: str) -> str:
 
 def _extract_file_id(url: str) -> str:
     match = re.search(r"/d/([a-zA-Z0-9_-]+)", url)
+    if match:
+        return match.group(1)
+    # Handle drive.google.com/open?id=FILE_ID format
+    match = re.search(r"[?&]id=([a-zA-Z0-9_-]+)", url)
     return match.group(1) if match else url
 
 

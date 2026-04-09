@@ -29,6 +29,12 @@ class TestUrlParsing:
         url = "https://drive.google.com/file/d/1aBcDeF/view"
         assert _extract_file_id(url) == "1aBcDeF"
 
+    def test_extract_open_id_format(self):
+        from vgv_rag.ingestion.connectors.google_drive import _extract_file_id
+
+        url = "https://drive.google.com/open?id=1aBcDeFgHiJkLmNoPqRsT"
+        assert _extract_file_id(url) == "1aBcDeFgHiJkLmNoPqRsT"
+
 
 class TestDiscoverSources:
     @pytest.fixture
