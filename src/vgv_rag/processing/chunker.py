@@ -19,6 +19,7 @@ CHUNKING_CONFIG: dict[str, ChunkConfig] = {
     "pr":           ChunkConfig("by_section",     500,  0),
     "design_spec":  ChunkConfig("by_component",   400,  0),
     "issue":        ChunkConfig("whole_document", 800,  0),
+    "presentation": ChunkConfig("by_section",     500,  0),
 }
 DEFAULT_CONFIG = ChunkConfig("recursive_split", 500, 50)
 

@@ -33,6 +33,9 @@ def build_connector_registry():
             email=settings.atlassian_email,
             domain=settings.atlassian_domain,
         )
+    if settings.google_service_account_json:
+        from vgv_rag.ingestion.connectors.google_drive import GoogleDriveConnector
+        connectors["google_drive"] = GoogleDriveConnector(credentials=settings.google_service_account_json)
     return connectors
 
 

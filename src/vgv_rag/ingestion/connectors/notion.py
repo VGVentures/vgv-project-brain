@@ -2,22 +2,7 @@ import asyncio
 import re
 from datetime import datetime, timezone
 from notion_client import Client
-from vgv_rag.ingestion.connectors.types import RawDocument, Source, ProjectConfig
-
-ARTIFACT_PATTERNS: list[tuple[re.Pattern, str]] = [
-    (re.compile(r"meeting|sync|standup|retro|demo|kickoff", re.I), "meeting_note"),
-    (re.compile(r"prd|product requirement|spec|brief", re.I), "prd"),
-    (re.compile(r"adr|decision|architecture", re.I), "adr"),
-    (re.compile(r"story|ticket|task|feature", re.I), "story"),
-    (re.compile(r"design|figma|ui|ux", re.I), "design_spec"),
-]
-
-
-def _detect_artifact_type(title: str) -> str:
-    for pattern, artifact_type in ARTIFACT_PATTERNS:
-        if pattern.search(title):
-            return artifact_type
-    return "document"
+from vgv_rag.ingestion.connectors.types import RawDocument, Source, ProjectConfig, detect_artifact_type
 
 
 def _extract_title(page: dict) -> str:
@@ -82,7 +67,7 @@ class NotionConnector:
                 title=title,
                 author=None,
                 date=edited,
-                artifact_type=_detect_artifact_type(title),
+                artifact_type=detect_artifact_type(title),
                 source_tool="notion",
             ))
 

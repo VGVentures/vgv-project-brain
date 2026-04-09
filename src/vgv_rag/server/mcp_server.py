@@ -18,7 +18,7 @@ async def search_project_context(
     source_tool: str = "",
     top_k: int = 5,
 ) -> str:
-    """Search project knowledge across Notion, Slack, GitHub, Figma, and Jira. Returns relevant chunks with source links."""
+    """Search project knowledge across Notion, Slack, GitHub, Figma, Google Drive, and Jira. Returns relevant chunks with source links."""
     filters = {k: v for k, v in {"artifact_type": artifact_type, "source_tool": source_tool}.items() if v}
     return await handle_search_project_context(
         query=query, user_email=DEV_EMAIL, project=project, filters=filters, top_k=top_k,

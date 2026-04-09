@@ -29,6 +29,14 @@ def _classify_url(url: str, config: ProjectConfig) -> None:
         config.figma_files.append(url)
     elif "atlassian.net" in url or "jira" in url:
         config.jira_projects.append(url)
+    elif "docs.google.com/spreadsheets" in url:
+        pass  # Sheets deferred — intentionally ignored
+    elif "drive.google.com/drive/folders" in url:
+        config.google_drive_folders.append(url)
+    elif "docs.google.com" in url or "drive.google.com/file" in url or "drive.google.com/open" in url:
+        config.google_drive_docs.append(url)
+    elif "drive.google.com" in url:
+        config.google_drive_folders.append(url)  # Bare drive links are likely folders
     elif "notion.so" in url:
         config.notion_pages.append(url)
 

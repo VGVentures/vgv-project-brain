@@ -42,3 +42,14 @@ def test_unknown_type_uses_recursive_split():
 def test_all_chunks_nonempty():
     chunks = chunk(MEETING_NOTE, "prd")
     assert all(c.strip() for c in chunks)
+
+
+def test_presentation_config_exists():
+    from vgv_rag.processing.chunker import CHUNKING_CONFIG
+    assert "presentation" in CHUNKING_CONFIG
+
+
+def test_presentation_chunks_by_section():
+    text = "# Slide 1\nIntro content\n\n# Slide 2\nMore content here"
+    chunks = chunk(text, "presentation")
+    assert len(chunks) >= 2
