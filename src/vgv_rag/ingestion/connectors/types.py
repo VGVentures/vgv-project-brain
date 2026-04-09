@@ -31,6 +31,8 @@ class ProjectConfig:
     figma_files: list[str] = field(default_factory=list)
     jira_projects: list[str] = field(default_factory=list)
     notion_pages: list[str] = field(default_factory=list)
+    google_drive_folders: list[str] = field(default_factory=list)
+    google_drive_docs: list[str] = field(default_factory=list)
 
 
 class Connector(Protocol):
