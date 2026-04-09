@@ -13,6 +13,9 @@ async def handle_search_project_context(
     filters: dict | None = None,
     top_k: int = 5,
 ) -> str:
+    # Get user's projects (used for both auto-detection and membership verification)
+    user_projects = await list_projects_for_user(user_email)
+
     # Resolve project
     if project:
         proj = await get_project_by_name(project)
@@ -20,13 +23,11 @@ async def handle_search_project_context(
             return f"Project not found: {project}"
         project_id = proj["id"]
     else:
-        projects = await list_projects_for_user(user_email)
-        if not projects:
+        if not user_projects:
             return "No projects found for your account."
-        project_id = projects[0]["id"]
+        project_id = user_projects[0]["id"]
 
     # Verify membership
-    user_projects = await list_projects_for_user(user_email)
     if project_id not in [p["id"] for p in user_projects]:
         return f"Not authorized: you are not a member of this project."
 

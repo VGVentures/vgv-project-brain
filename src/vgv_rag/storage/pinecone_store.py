@@ -7,8 +7,6 @@ from pinecone import Pinecone
 
 log = logging.getLogger(__name__)
 
-_index = None
-
 
 @lru_cache(maxsize=1)
 def _get_index():
@@ -65,12 +63,16 @@ async def query_vectors(
 
 async def delete_by_source(namespace: str, source_id: str) -> None:
     index = _get_index()
-    # List all vectors with the source_id prefix
-    all_ids = []
-    for page in await asyncio.to_thread(
-        lambda: index.list(prefix=f"{source_id}:", namespace=namespace)
-    ):
-        all_ids.extend(page)
+
+    # Collect all vector IDs inside the thread to avoid consuming the
+    # paginated iterator on the event loop.
+    def _list_ids():
+        all_ids = []
+        for page in index.list(prefix=f"{source_id}:", namespace=namespace):
+            all_ids.extend(page)
+        return all_ids
+
+    all_ids = await asyncio.to_thread(_list_ids)
 
     if all_ids:
         await asyncio.to_thread(

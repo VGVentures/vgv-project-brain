@@ -8,7 +8,7 @@ from vgv_rag.storage.pinecone_store import upsert_vectors, delete_by_source, bui
 from vgv_rag.processing.chunker import chunk
 from vgv_rag.processing.embedder import embed_batch
 from vgv_rag.processing.metadata import build_chunk_metadata
-from vgv_rag.ingestion.connectors.types import Source, Connector
+from vgv_rag.ingestion.connectors.types import Source
 
 log = logging.getLogger(__name__)
 
@@ -41,12 +41,6 @@ async def sync_source(source: Source, connector) -> None:
         msg = str(exc)
         log.error("Sync failed for source %s: %s", source.id, msg)
         await update_source_sync_status(source.id, "error", msg)
-
-
-def is_business_hours() -> bool:
-    from datetime import datetime
-    now = datetime.now()
-    return 1 <= now.isoweekday() <= 5 and 8 <= now.hour <= 20
 
 
 def start_scheduler(get_connector) -> AsyncIOScheduler:
