@@ -6,7 +6,6 @@ dependencies = [
     "mcp[cli]>=1.0.0",
     "supabase>=2.0.0",
     "pydantic-settings>=2.0.0",
-    "sentence-transformers>=3.0.0",
     "notion-client>=2.0.0",
     "slack-sdk>=3.0.0",
     "PyGithub>=2.0.0",
@@ -18,6 +17,8 @@ dependencies = [
     "google-api-python-client>=2.194.0",
     "google-auth>=2.49.1",
     "pdfminer-six>=20260107",
+    "voyageai>=0.3.7",
+    "pinecone>=8.1.2",
 ]
 
 [dependency-groups]

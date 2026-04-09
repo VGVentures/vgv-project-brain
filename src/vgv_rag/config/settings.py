@@ -20,6 +20,13 @@ class Settings(BaseSettings):
     atlassian_domain: Optional[str] = None
     google_service_account_json: Optional[str] = None  # Base64-encoded JSON key or file path
 
+    # Voyage.ai
+    voyage_api_key: str = ""  # Required — startup health check fails if empty
+
+    # Pinecone
+    pinecone_api_key: str = ""  # Required — startup health check fails if empty
+    pinecone_index_name: str = "vgv-project-rag"
+
     # Service
     port: int = 3000
     sync_cron: str = "*/15 8-20 * * 1-5"
