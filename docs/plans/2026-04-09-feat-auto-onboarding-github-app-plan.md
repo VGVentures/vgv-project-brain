@@ -59,11 +59,20 @@ erDiagram
 - **Programs are first-class entities** with their own table. Projects get `program_id` FK.
 - **Program-level sources** attached directly to the program (via `program_id` on `sources` table) — not duplicated across child projects, not stored in a synthetic project.
 - **Discovery runs hourly** (not every 15 min) to limit Notion API usage. Source sync stays at 15 min.
-- **Notion rate limiting** via asyncio semaphore (3 req/s) shared across all Notion API calls.
 - **Program access model:** If a user is a member of any child project, they can search program-level content.
 - **Stale project detection:** If a project disappears from a program page, mark its sources as `archived` — don't delete vectors.
-- **GitHub App auth** with fallback to PAT. Token generated per sync cycle (tokens last 1 hour, cycles are 15 min).
+- **GitHub App auth** with fallback to PAT. Token generated per sync cycle (tokens last 1 hour, cycles are 15 min). Token exchange uses `asyncio.to_thread` to avoid blocking the event loop.
 - **Single GitHub installation** assumed (VGVentures org only). Multi-org support deferred.
+- **`ProgramConfig` defined in `types.py`** alongside existing `ProjectConfig` and `Source` — follows codebase convention.
+- **`Source` dataclass updated** to make `project_id` optional (`str | None`) for program-level sources. Pinecone namespace for program-level sources uses the `program_id`.
+- **Sources unique constraint** updated: `UNIQUE(COALESCE(project_id, program_id), connector, source_id)` — handles nullable `project_id` for program-level sources.
+- **Multi-namespace Pinecone search:** Query each namespace independently with proportional candidate budgets (`top_k * 4 / N` per namespace), merge all results, then rerank the combined set. On partial failure, return results from successful namespaces only.
+
+**Plan split (from technical review):** This plan should be implemented as **2 independent PRs**:
+- **PR 1: GitHub App auth** (Task 7 + Task 8 partial) — standalone, no dependencies
+- **PR 2: Auto-onboarding** (Tasks 1-6, 8 partial, 9-10) — the larger feature
+
+**Task ordering fix (from technical review):** Task 9 (update `upsert_project`/`upsert_source` signatures) must run before Task 4 (discovery engine). The task order below reflects this.
 
 ---
 
@@ -92,6 +101,13 @@ ALTER TABLE projects ADD COLUMN IF NOT EXISTS program_id UUID REFERENCES program
 
 -- Add program_id to sources (for program-level sources; mutually exclusive with project_id)
 ALTER TABLE sources ADD COLUMN IF NOT EXISTS program_id UUID REFERENCES programs(id) ON DELETE CASCADE;
+
+-- Drop old unique constraint (can't handle NULL project_id for program-level sources)
+ALTER TABLE sources DROP CONSTRAINT IF EXISTS sources_project_id_connector_source_id_key;
+
+-- New unique constraint using COALESCE to handle nullable project_id/program_id
+CREATE UNIQUE INDEX IF NOT EXISTS sources_owner_connector_source_id_idx
+    ON sources (COALESCE(project_id, program_id), connector, source_id);
 
 -- Index for looking up sources by program
 CREATE INDEX IF NOT EXISTS sources_program_id_idx ON sources (program_id);
@@ -148,13 +164,87 @@ git commit -m "feat: add program CRUD operations to supabase_queries"
 
 ---
 
-## Task 3: Create program page parser
+## Task 3: Update `upsert_project` and `upsert_source` to accept `program_id`
 
 **Files:**
+- Edit: `src/vgv_rag/storage/supabase_queries.py`
+- Edit: `src/vgv_rag/ingestion/connectors/types.py`
+- Edit: `tests/test_supabase_queries.py`
+
+**Must run before Task 5 (discovery engine) which calls these functions with `program_id`.**
+
+**Step 1: Update `Source` dataclass in `types.py`**
+
+Make `project_id` optional for program-level sources:
+
+```python
+@dataclass
+class Source:
+    id: str
+    project_id: str | None      # None for program-level sources
+    program_id: str | None = None  # Set for program-level sources
+    connector: str
+    source_url: str
+    source_id: str
+    last_synced_at: str | None = None
+```
+
+**Step 2: Update `upsert_project` signature**
+
+```python
+async def upsert_project(
+    name: str, notion_hub_url: str, config: dict | None = None, program_id: str | None = None
+) -> str:
+    payload = {"name": name, "notion_hub_url": notion_hub_url, "config": config or {}}
+    if program_id:
+        payload["program_id"] = program_id
+    # ... existing upsert logic
+```
+
+**Step 3: Update `upsert_source` to accept `program_id`**
+
+For program-level sources, `project_id` is None and `program_id` is set.
+
+```python
+async def upsert_source(
+    connector: str, source_url: str, source_id: str,
+    project_id: str | None = None,
+    program_id: str | None = None,
+) -> str:
+```
+
+**Step 4: Update `sync_source` to use `program_id` as Pinecone namespace when `project_id` is None**
+
+```python
+namespace = source.project_id or source.program_id
+```
+
+**Step 5: Run tests, commit**
+
+```bash
+git commit -m "feat: update upsert_project, upsert_source, and Source for program_id support"
+```
+
+---
+
+## Task 4: Create program page parser
+
+**Files:**
+- Edit: `src/vgv_rag/ingestion/connectors/types.py` (add `ProgramConfig`)
 - Create: `src/vgv_rag/ingestion/program_parser.py`
 - Create: `tests/test_program_parser.py`
 
-**Step 1: Write failing tests**
+**Step 1: Add `ProgramConfig` to `types.py`** (follows codebase convention — all dataclasses in `types.py`)
+
+```python
+@dataclass
+class ProgramConfig:
+    project_hub_urls: list[str]      # Links to project pages
+    quick_links: list[str]           # Drive, SOW/MSA, account plans
+    communication_channels: list[str] # Slack channels, etc.
+```
+
+**Step 2: Write failing tests**
 
 Test that the parser:
 - Identifies "Project Hubs" section and extracts project page links
@@ -163,15 +253,11 @@ Test that the parser:
 - Returns a `ProgramConfig` dataclass with `project_hub_urls`, `quick_links`, `communication_channels`
 - Handles pages that are NOT program pages (no "Project Hubs" heading) → returns None
 
-**Step 2: Write `program_parser.py`**
+**Step 3: Write `program_parser.py`**
+
+Reuse `_extract_page_id` and URL extraction helpers from `project_hub_parser.py` — extract shared helpers into a common module or import directly.
 
 ```python
-@dataclass
-class ProgramConfig:
-    project_hub_urls: list[str]      # Links to project pages
-    quick_links: list[str]           # Drive, SOW/MSA, account plans
-    communication_channels: list[str] # Slack channels, etc.
-
 async def parse_program_page(page_url: str, notion_token: str) -> ProgramConfig | None:
     """Parse a Notion program page. Returns None if the page is not a program page."""
     # 1. Extract page ID from URL
@@ -383,17 +469,27 @@ The key change: when querying Pinecone, include both the project namespace AND t
 namespaces_to_search = [project_id]
 
 # Also search the parent program's namespace if user has access
-if project has a program_id:
-    namespaces_to_search.append(program_id)
+project = await get_project_by_id(project_id)  # need to add this query
+if project and project.get("program_id"):
+    namespaces_to_search.append(project["program_id"])
 
-# Query each namespace and merge results before reranking
+# Query each namespace with proportional candidate budget
+per_ns_candidates = max(top_k, (top_k * RERANK_CANDIDATE_MULTIPLIER) // len(namespaces_to_search))
+all_candidates = []
+for ns in namespaces_to_search:
+    try:
+        results = await query_vectors(namespace=ns, embedding=vector, top_k=per_ns_candidates, filters=filter_meta)
+        all_candidates.extend(results)
+    except Exception as exc:
+        log.warning("Search failed for namespace %s: %s", ns, exc)
+
+# Rerank the merged candidate set
+results = await rerank(query, all_candidates, top_k=top_k)
 ```
 
-Alternatively, if the user doesn't specify a project, search all their projects + all accessible programs.
+If the user doesn't specify a project, search all their projects + all accessible programs (via `list_programs_for_user`).
 
-**Step 3: Update `pinecone_store.py` if needed**
-
-May need a `query_multiple_namespaces` helper or just loop over namespaces.
+**Step 3: Add `query_multiple_namespaces` helper to `pinecone_store.py`** (optional — can also just loop in search.py as shown above)
 
 **Step 4: Run tests, commit**
 
@@ -491,13 +587,15 @@ class GitHubConnector:
         }
         encoded_jwt = jwt.encode(payload, self._private_key, algorithm="RS256")
 
-        # Exchange JWT for installation token
-        resp = httpx.post(
-            f"https://api.github.com/app/installations/{self._installation_id}/access_tokens",
-            headers={
-                "Authorization": f"Bearer {encoded_jwt}",
-                "Accept": "application/vnd.github+json",
-            },
+        # Exchange JWT for installation token (via to_thread to avoid blocking event loop)
+        resp = await asyncio.to_thread(
+            lambda: httpx.post(
+                f"https://api.github.com/app/installations/{self._installation_id}/access_tokens",
+                headers={
+                    "Authorization": f"Bearer {encoded_jwt}",
+                    "Accept": "application/vnd.github+json",
+                },
+            )
         )
         resp.raise_for_status()
         data = resp.json()
@@ -607,45 +705,7 @@ git commit -m "docs: update deployment guide for auto-onboarding and GitHub App"
 
 ---
 
-## Task 9: Update `upsert_project` to accept `program_id`
-
-**Files:**
-- Edit: `src/vgv_rag/storage/supabase_queries.py`
-- Edit: `tests/test_supabase_queries.py`
-
-**Step 1: Update `upsert_project` signature**
-
-```python
-async def upsert_project(
-    name: str, notion_hub_url: str, config: dict | None = None, program_id: str | None = None
-) -> str:
-    payload = {"name": name, "notion_hub_url": notion_hub_url, "config": config or {}}
-    if program_id:
-        payload["program_id"] = program_id
-    # ... existing upsert logic
-```
-
-**Step 2: Update `upsert_source` to accept `program_id`**
-
-For program-level sources (Drive, comms channels), the source has `program_id` set and `project_id` null.
-
-```python
-async def upsert_source(
-    project_id: str | None = None,
-    program_id: str | None = None,
-    connector: str, source_url: str, source_id: str,
-) -> str:
-```
-
-**Step 3: Run tests, commit**
-
-```bash
-git commit -m "feat: update upsert_project and upsert_source to support program_id"
-```
-
----
-
-## Task 10: Cleanup and full test run
+## Task 9: Cleanup and full test run
 
 **Files:**
 - Edit: `scripts/seed_project.py` (update to optionally accept `--program-url` for linking to a program)
