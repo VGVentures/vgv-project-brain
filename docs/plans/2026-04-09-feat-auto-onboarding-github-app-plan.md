@@ -69,8 +69,8 @@ erDiagram
 - **Multi-namespace Pinecone search:** Query each namespace independently with proportional candidate budgets (`top_k * 4 / N` per namespace), merge all results, then rerank the combined set. On partial failure, return results from successful namespaces only.
 
 **Plan split (from technical review):** This plan should be implemented as **2 independent PRs**:
-- **PR 1: GitHub App auth** (Task 7 + Task 8 partial) — standalone, no dependencies
-- **PR 2: Auto-onboarding** (Tasks 1-6, 8 partial, 9-10) — the larger feature
+- **PR 1: GitHub App auth** (Task 8 + Task 9 GitHub docs) — standalone, no dependencies
+- **PR 2: Auto-onboarding** (Tasks 1–7, Task 9 onboarding docs, Task 10) — the larger feature
 
 **Task ordering fix (from technical review):** Task 9 (update `upsert_project`/`upsert_source` signatures) moved to Task 3 (before discovery engine). Tasks renumbered accordingly.
 
@@ -140,6 +140,7 @@ Tests for:
 - `list_projects_for_program(program_id)` → returns projects under a program
 - `list_programs_for_user(user_email)` → returns programs where user is a member of any child project
 - `list_sources_for_program(program_id)` → returns sources attached to a program
+- `get_project_by_id(project_id)` → returns project dict (needed by search to look up `program_id`)
 
 **Step 2: Add functions to `supabase_queries.py`**
 
@@ -162,6 +163,9 @@ async def list_programs_for_user(user_email: str) -> list[dict]:
 
 async def list_sources_for_program(program_id: str) -> list[dict]:
     # Return sources where program_id matches
+
+async def get_project_by_id(project_id: str) -> dict | None:
+    # Lookup project by ID (used by search to find parent program_id)
 ```
 
 **Step 3: Run tests, commit**
@@ -403,7 +407,27 @@ async def _search_all_pages(client) -> list[dict]:
             break
         cursor = result["next_cursor"]
     return pages
+
+
+def _page_to_url(page: dict) -> str:
+    """Construct a Notion URL from a page object's id."""
+
+def _extract_title(page: dict) -> str:
+    """Extract plain-text title from a Notion page object's properties."""
+
+def _extract_project_name(hub_url: str) -> str:
+    """Extract a human-readable project name from the Notion page URL slug."""
+
+async def _create_program_sources(program_id: str, config: ProgramConfig) -> int:
+    """Classify quick_links and communication_channels URLs, upsert as sources with program_id.
+    Returns count of sources created."""
+
+async def _create_project_sources(project_id: str, config: ProjectConfig) -> int:
+    """Classify all URLs in ProjectConfig, upsert as sources with project_id.
+    Reuses _classify_url from project_hub_parser. Returns count of sources created."""
 ```
+
+**Note:** The scheduler's `run_sync` should skip sources with `sync_status="archived"` to avoid syncing removed projects.
 
 **Step 3: Run tests, commit**
 
@@ -756,9 +780,9 @@ git commit -m "docs: update deployment guide for auto-onboarding and GitHub App"
 pytest -x
 ```
 
-**Step 2: Fix any remaining issues**
+**Step 3: Fix any remaining issues**
 
-**Step 3: Commit**
+**Step 4: Commit**
 
 ```bash
 git commit -m "chore: cleanup and verify full test suite"
