@@ -2,13 +2,6 @@ import pytest
 from unittest.mock import MagicMock
 
 
-@pytest.fixture
-def mock_supabase(mocker):
-    mock = MagicMock()
-    mocker.patch("vgv_rag.storage.supabase_queries.get_client", return_value=mock)
-    return mock
-
-
 @pytest.mark.asyncio
 async def test_upsert_project_returns_id(mock_supabase):
     from vgv_rag.storage.supabase_queries import upsert_project
@@ -22,10 +15,15 @@ async def test_upsert_project_returns_id(mock_supabase):
 
 
 @pytest.mark.asyncio
-async def test_upsert_source_returns_id(mock_supabase):
+async def test_upsert_source_inserts_new(mock_supabase):
     from vgv_rag.storage.supabase_queries import upsert_source
 
-    mock_supabase.table.return_value.upsert.return_value.select.return_value.execute.return_value = MagicMock(
+    # No existing source found
+    mock_supabase.table.return_value.select.return_value.eq.return_value.eq.return_value.eq.return_value.execute.return_value = MagicMock(
+        data=[]
+    )
+    # Insert returns the new source
+    mock_supabase.table.return_value.insert.return_value.select.return_value.execute.return_value = MagicMock(
         data=[{"id": "src-uuid-456"}]
     )
 
@@ -34,6 +32,26 @@ async def test_upsert_source_returns_id(mock_supabase):
         source_url="https://notion.so/page", source_id="page-id",
     )
     assert source_id == "src-uuid-456"
+
+
+@pytest.mark.asyncio
+async def test_upsert_source_updates_existing(mock_supabase):
+    from vgv_rag.storage.supabase_queries import upsert_source
+
+    # Existing source found
+    mock_supabase.table.return_value.select.return_value.eq.return_value.eq.return_value.eq.return_value.execute.return_value = MagicMock(
+        data=[{"id": "src-existing"}]
+    )
+    # Update returns the source
+    mock_supabase.table.return_value.update.return_value.eq.return_value.select.return_value.execute.return_value = MagicMock(
+        data=[{"id": "src-existing"}]
+    )
+
+    source_id = await upsert_source(
+        project_id="proj-1", connector="notion",
+        source_url="https://notion.so/page", source_id="page-id",
+    )
+    assert source_id == "src-existing"
 
 
 @pytest.mark.asyncio

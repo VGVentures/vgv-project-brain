@@ -19,6 +19,8 @@ dependencies = [
     "pdfminer-six>=20260107",
     "voyageai>=0.3.7",
     "pinecone>=8.1.2",
+    "pyjwt>=2.12.1",
+    "cryptography>=46.0.5",
 ]
 
 [dependency-groups]

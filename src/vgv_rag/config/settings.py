@@ -13,6 +13,11 @@ class Settings(BaseSettings):
     # Optional connectors
     notion_api_token: Optional[str] = None
     slack_bot_token: Optional[str] = None
+    # GitHub App (preferred — org-level, all repos)
+    github_app_id: Optional[str] = None
+    github_app_private_key: Optional[str] = None  # PEM-encoded private key or path to .pem file
+    github_app_installation_id: Optional[str] = None
+    # GitHub PAT (fallback)
     github_pat: Optional[str] = None
     figma_api_token: Optional[str] = None
     atlassian_api_token: Optional[str] = None

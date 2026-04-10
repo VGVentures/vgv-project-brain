@@ -18,11 +18,19 @@ class RawDocument:
 @dataclass
 class Source:
     id: str
-    project_id: str
+    project_id: str | None  # None for program-level sources
     connector: str
     source_url: str
     source_id: str
     last_synced_at: datetime | None = None
+    program_id: str | None = None  # Set for program-level sources
+
+
+@dataclass
+class ProgramConfig:
+    project_hub_urls: list[str] = field(default_factory=list)
+    quick_links: list[str] = field(default_factory=list)
+    communication_channels: list[str] = field(default_factory=list)
 
 
 @dataclass

@@ -10,12 +10,12 @@ from vgv_rag.ingestion.project_hub_parser import parse_project_hub
 from vgv_rag.ingestion.connectors.notion import NotionConnector
 from vgv_rag.ingestion.connectors.types import Source
 from vgv_rag.ingestion.scheduler import sync_source
-from vgv_rag.storage.supabase_queries import upsert_project, upsert_source
+from vgv_rag.storage.supabase_queries import upsert_project, upsert_source, get_program_by_notion_url
 from vgv_rag.storage.client import get_client
 from vgv_rag.config.settings import settings
 
 
-async def run(hub_url: str, name: str, members: list[str]) -> None:
+async def run(hub_url: str, name: str, members: list[str], program_url: str | None = None) -> None:
     if not settings.notion_api_token:
         raise SystemExit("NOTION_API_TOKEN is required")
 
@@ -26,11 +26,22 @@ async def run(hub_url: str, name: str, members: list[str]) -> None:
     config = await parse_project_hub(hub_url, settings.notion_api_token)
     print(f"   Discovered: {dataclasses.asdict(config)}\n")
 
+    # Resolve program_id if a program URL was provided
+    program_id = None
+    if program_url:
+        program = await get_program_by_notion_url(program_url)
+        if program:
+            program_id = program["id"]
+            print(f"   Linking to program: {program['name']} ({program_id})")
+        else:
+            print(f"   Warning: program not found for {program_url}, proceeding without link")
+
     print("2. Creating project record...")
     project_id = await upsert_project(
         name=name,
         notion_hub_url=hub_url,
         config=dataclasses.asdict(config),
+        program_id=program_id,
     )
     print(f"   Project ID: {project_id}\n")
 
@@ -69,8 +80,9 @@ def main() -> None:
     parser.add_argument("--hub-url", required=True)
     parser.add_argument("--name", required=True)
     parser.add_argument("--member", action="append", default=[], dest="members")
+    parser.add_argument("--program-url", default=None, help="Notion URL of the parent program (optional)")
     args = parser.parse_args()
-    asyncio.run(run(args.hub_url, args.name, args.members))
+    asyncio.run(run(args.hub_url, args.name, args.members, args.program_url))
 
 
 if __name__ == "__main__":

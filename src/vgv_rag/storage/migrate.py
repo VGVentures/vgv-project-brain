@@ -9,8 +9,12 @@ async def check_schema(supabase_url: str) -> bool:
     from vgv_rag.storage.client import get_client
     client = get_client()
     try:
+        # Check both core tables exist
         await asyncio.to_thread(
             lambda: client.table("projects").select("id").limit(1).execute()
+        )
+        await asyncio.to_thread(
+            lambda: client.table("programs").select("id").limit(1).execute()
         )
         return True
     except Exception as exc:

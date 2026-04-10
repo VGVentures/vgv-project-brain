@@ -4,7 +4,7 @@
 
 ## What This Is
 
-A centralized MCP server that indexes project artifacts from Notion, Slack, GitHub, Figma, Google Drive, and Atlassian (Jira) into a Pinecone vector database, then serves semantic search results (with Voyage.ai reranking) to any Claude interface (Code, Desktop, Cowork, claude.ai). Supabase handles auth and relational metadata. Team members authenticate via Google Workspace SSO through Supabase Auth. Project configuration is pulled from VGV's existing Notion Project Hub pages — no admin UI needed.
+A centralized MCP server that indexes project artifacts from Notion, Slack, GitHub, Figma, Google Drive, and Atlassian (Jira) into a Pinecone vector database, then serves semantic search results (with Voyage.ai reranking) to any Claude interface (Code, Desktop, Cowork, claude.ai). Supabase handles auth and relational metadata. Team members authenticate via Google Workspace SSO through Supabase Auth. Programs and projects are auto-discovered by crawling the Notion PHT teamspace — no manual onboarding or admin UI needed.
 
 ## Architecture
 
@@ -39,8 +39,8 @@ A centralized MCP server that indexes project artifacts from Notion, Slack, GitH
 ┌──────────────────────┐  ┌───────────────────────────────┐
 │  Supabase            │  │  Pinecone                     │
 │  PostgreSQL (auth,   │  │  Serverless vector DB         │
-│  projects, sources,  │  │  (namespace-per-project       │
-│  members)            │  │   isolation)                  │
+│  programs, projects, │  │  (namespace-per-project       │
+│  sources, members)   │  │   + per-program isolation)    │
 │  Supabase Auth +     │  │                               │
 │  Google SSO          │  │                               │
 └──────────────────────┘  └───────────────────────────────┘
@@ -80,7 +80,9 @@ vgv-project-rag/
 │       │       ├── list_sources.py    ← list_sources handler
 │       │       └── ingest.py          ← ingest_document handler
 │       ├── ingestion/
-│       │   ├── scheduler.py           ← Cron-based sync orchestrator
+│       │   ├── scheduler.py           ← Hourly discovery + 15-min source sync
+│       │   ├── discovery.py           ← Auto-onboarding: crawls Notion for programs/projects
+│       │   ├── program_parser.py      ← Parses Notion program pages
 │       │   ├── project_hub_parser.py  ← Reads Notion Project Hub, extracts source URLs
 │       │   └── connectors/
 │       │       ├── notion.py          ← Notion API: pages, databases, meeting notes
@@ -100,7 +102,8 @@ vgv-project-rag/
 │       │   ├── pinecone_store.py      ← Vector operations (upsert, query, delete)
 │       │   └── migrations/
 │       │       ├── 001_initial_schema.sql ← Tables, indexes
-│       │       └── 002_remove_chunks.sql  ← Remove pgvector chunks table
+│       │       ├── 002_remove_chunks.sql  ← Remove pgvector chunks table
+│       │       └── 003_add_programs.sql   ← Programs table, program-project FKs
 │       └── config/
 │           └── settings.py            ← Typed env var access via pydantic-settings
 ├── scripts/
@@ -114,12 +117,23 @@ vgv-project-rag/
 ### Database Schema
 
 ```sql
--- Projects table (discovered from Notion Project Hubs)
+-- Programs table (auto-discovered from Notion PHT)
+CREATE TABLE programs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name TEXT NOT NULL,
+    notion_page_url TEXT NOT NULL UNIQUE,
+    config JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Projects table (discovered from program pages or manually seeded)
 CREATE TABLE projects (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name TEXT NOT NULL,
     notion_hub_url TEXT NOT NULL UNIQUE,
     notion_pht_url TEXT,
+    program_id UUID REFERENCES programs(id) ON DELETE SET NULL,  -- nullable for legacy projects
     config JSONB DEFAULT '{}'::jsonb,        -- Parsed Helpful Links (connector configs)
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
@@ -128,14 +142,16 @@ CREATE TABLE projects (
 -- Source tracking (what's been indexed, when)
 CREATE TABLE sources (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    project_id UUID REFERENCES projects(id) ON DELETE CASCADE,
+    project_id UUID REFERENCES projects(id) ON DELETE CASCADE,   -- null for program-level sources
+    program_id UUID REFERENCES programs(id) ON DELETE CASCADE,   -- set for program-level sources
     connector TEXT NOT NULL,                  -- 'notion' | 'slack' | 'github' | 'figma' | 'google_drive' | 'atlassian'
     source_url TEXT NOT NULL,                 -- Original URL from Project Hub
     source_id TEXT NOT NULL,                  -- Connector-specific ID (channel ID, repo slug, etc.)
     last_synced_at TIMESTAMPTZ,
-    sync_status TEXT DEFAULT 'pending',       -- 'pending' | 'syncing' | 'success' | 'error'
+    sync_status TEXT DEFAULT 'pending',       -- 'pending' | 'syncing' | 'success' | 'error' | 'archived'
     sync_error TEXT,
-    UNIQUE(project_id, connector, source_id)
+    -- COALESCE-based unique index handles nullable project_id for program-level sources
+    -- UNIQUE INDEX sources_owner_connector_source_id_idx ON (COALESCE(project_id, program_id), connector, source_id)
 );
 
 -- Project team membership (for access control)
@@ -148,10 +164,12 @@ CREATE TABLE project_members (
 );
 
 -- NOTE: Vector storage (chunks + embeddings) is in Pinecone, not Supabase.
--- Pinecone uses namespace-per-project isolation.
+-- Pinecone uses namespace-per-project AND namespace-per-program isolation.
+-- Program-level sources use program_id as the Pinecone namespace.
 -- Vector IDs follow {source_id}:{chunk_index} scheme.
 -- Chunk content is stored in Pinecone metadata alongside embeddings.
 -- Project membership is verified at the application layer before querying Pinecone.
+-- Program access: users who are members of any child project can search program content.
 ```
 
 ### Supabase Auth Configuration
@@ -374,6 +392,11 @@ SUPABASE_ANON_KEY=eyJ...                # Anon key (used for client auth flow)
 # Connector credentials (org-level, managed by IT)
 NOTION_API_TOKEN=secret_...
 SLACK_BOT_TOKEN=xoxb-...
+# GitHub (choose App OR PAT)
+GITHUB_APP_ID=123456
+GITHUB_APP_PRIVATE_KEY=-----BEGIN RSA PRIVATE KEY-----\n...
+GITHUB_APP_INSTALLATION_ID=12345678
+# OR
 GITHUB_PAT=ghp_...
 FIGMA_API_TOKEN=figd_...
 ATLASSIAN_API_TOKEN=...

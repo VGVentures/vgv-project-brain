@@ -1,15 +1,77 @@
 import asyncio
 import re
+import time
 from datetime import datetime, timezone
+
+import httpx
+import jwt
 from github import Github
+
 from vgv_rag.ingestion.connectors.types import RawDocument, Source, ProjectConfig
 
 KEY_FILES = ["README.md", "CLAUDE.md", "AGENTS.md"]
 
 
 class GitHubConnector:
-    def __init__(self, token: str):
-        self._client = Github(token)
+    def __init__(
+        self,
+        app_id: str | None = None,
+        private_key: str | None = None,
+        installation_id: str | None = None,
+        pat: str | None = None,
+    ):
+        self._app_id = app_id
+        self._private_key = private_key
+        self._installation_id = installation_id
+        self._pat = pat
+        self._token: str | None = None
+        self._token_expires_at: float = 0
+
+    def _get_client(self) -> Github:
+        """Get an authenticated GitHub client. Prefers App auth, falls back to PAT."""
+        if self._app_id and self._private_key and self._installation_id:
+            token = self._get_installation_token()
+            return Github(token)
+        elif self._pat:
+            return Github(self._pat)
+        else:
+            raise RuntimeError("No GitHub credentials configured")
+
+    def _get_installation_token(self) -> str:
+        """Generate or reuse an installation access token."""
+        if self._token and time.time() < self._token_expires_at - 60:
+            return self._token
+
+        now = int(time.time())
+        payload = {
+            "iat": now - 60,
+            "exp": now + (10 * 60),
+            "iss": self._app_id,
+        }
+        encoded_jwt = jwt.encode(payload, self._private_key, algorithm="RS256")
+
+        resp = httpx.post(
+            f"https://api.github.com/app/installations/{self._installation_id}/access_tokens",
+            headers={
+                "Authorization": f"Bearer {encoded_jwt}",
+                "Accept": "application/vnd.github+json",
+            },
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        self._token = data["token"]
+        # Parse actual expiry from API response; fall back to 1 hour
+        expires_at = data.get("expires_at")
+        if expires_at:
+            from datetime import datetime, timezone
+            try:
+                exp_dt = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+                self._token_expires_at = exp_dt.timestamp()
+            except (ValueError, TypeError):
+                self._token_expires_at = time.time() + 3600
+        else:
+            self._token_expires_at = time.time() + 3600
+        return self._token
 
     async def discover_sources(self, config: ProjectConfig) -> list[dict]:
         return [
@@ -18,7 +80,8 @@ class GitHubConnector:
         ]
 
     async def fetch_documents(self, source: Source, since: datetime | None = None) -> list[RawDocument]:
-        repo = await asyncio.to_thread(lambda: self._client.get_repo(source.source_id))
+        client = await asyncio.to_thread(self._get_client)
+        repo = await asyncio.to_thread(lambda: client.get_repo(source.source_id))
         docs = []
 
         for filename in KEY_FILES:
