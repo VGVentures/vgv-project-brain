@@ -85,7 +85,31 @@ Each connector is optional. The service activates only connectors whose credenti
 5. Copy the **Bot User OAuth Token** (`xoxb-...`) → `SLACK_BOT_TOKEN`
 6. Invite the bot to each channel you want to index
 
-### GitHub
+### GitHub (App — recommended)
+
+A GitHub App provides org-level access to all repositories without personal tokens.
+
+1. Go to **github.com/organizations/VGVentures/settings/apps**
+2. Click **New GitHub App**
+3. Configure:
+   - **Name**: `vgv-project-rag`
+   - **Homepage URL**: your deployment URL
+   - **Webhook**: uncheck "Active" (not needed)
+   - **Permissions**:
+     - Repository: Contents (Read-only)
+     - Repository: Pull requests (Read-only)
+     - Repository: Issues (Read-only)
+     - Repository: Metadata (Read-only)
+   - **Where can this app be installed?**: Only on this account
+4. Click **Create GitHub App**
+5. Note the **App ID** → `GITHUB_APP_ID`
+6. Generate a **Private Key** (.pem file) → `GITHUB_APP_PRIVATE_KEY`
+7. Go to **Install App** tab, install on VGVentures with **All repositories**
+8. Note the **Installation ID** from the URL → `GITHUB_APP_INSTALLATION_ID`
+
+### GitHub (PAT — fallback)
+
+If you can't set up a GitHub App, use a personal access token:
 
 1. Go to [github.com/settings/tokens](https://github.com/settings/tokens)
 2. Create a **Fine-grained personal access token** (or classic token)
@@ -131,16 +155,17 @@ Each connector is optional. The service activates only connectors whose credenti
 
 In the [Supabase SQL Editor](https://supabase.com/dashboard/project/_/sql/new):
 
-**For a fresh deployment**, run both migrations in order:
+**For a fresh deployment**, run all migrations in order:
 
 ```sql
 -- 1. Run 001_initial_schema.sql (creates projects, sources, project_members)
 -- 2. Run 002_remove_chunks.sql  (removes the unused chunks table and pgvector)
+-- 3. Run 003_add_programs.sql   (adds programs table, program_id FKs, discovery RPC)
 ```
 
 Paste the contents of each file from `src/vgv_rag/storage/migrations/`.
 
-**For an existing deployment** that previously used pgvector, run only `002_remove_chunks.sql`.
+**For an existing deployment**, run only the migrations you haven't applied yet.
 
 After running the migrations, verify the tables exist:
 
@@ -150,7 +175,7 @@ WHERE table_schema = 'public'
 ORDER BY table_name;
 ```
 
-You should see: `project_members`, `projects`, `sources`.
+You should see: `programs`, `project_members`, `projects`, `sources`.
 
 ## 4. Configure the Environment
 
@@ -172,6 +197,11 @@ PINECONE_INDEX_NAME=vgv-project-rag
 # Optional — add connectors as needed
 NOTION_API_TOKEN=secret_...
 SLACK_BOT_TOKEN=xoxb-...
+# GitHub (choose App OR PAT)
+GITHUB_APP_ID=123456
+GITHUB_APP_PRIVATE_KEY=-----BEGIN RSA PRIVATE KEY-----\n...
+GITHUB_APP_INSTALLATION_ID=12345678
+# OR
 GITHUB_PAT=ghp_...
 FIGMA_API_TOKEN=figd_...
 GOOGLE_SERVICE_ACCOUNT_JSON=...
@@ -245,7 +275,24 @@ gcloud run services logs read vgv-project-rag
 # Logs print to stdout
 ```
 
-## 7. Onboard a Project
+## 7. Auto-Onboarding
+
+The service automatically discovers all programs and projects from the Notion PHT teamspace.
+
+### Prerequisites
+1. Add the Notion integration to the PHT teamspace (gives access to all pages)
+2. Ensure program pages follow the template (contain a "Project Hubs" heading)
+3. Ensure project pages follow the template (contain a "Helpful Links" heading)
+
+### How it works
+- **On startup and hourly**: crawls Notion, discovers programs and projects
+- **Every 15 minutes**: syncs all discovered sources
+- New programs/projects are picked up automatically on the next discovery cycle
+- If a project is removed from a program page, its sources are marked as `archived` (vectors preserved)
+
+### Manual onboarding (optional)
+
+The seed script is still available for one-off imports:
 
 ```bash
 uv run python scripts/seed_project.py \
@@ -254,13 +301,6 @@ uv run python scripts/seed_project.py \
   --member "alice@verygood.ventures" \
   --member "bob@verygood.ventures"
 ```
-
-This:
-1. Parses the Notion Project Hub page
-2. Discovers linked sources (Slack channels, GitHub repos, etc.)
-3. Creates the project and source records in Supabase
-4. Adds team members
-5. Runs an initial Notion sync
 
 ## 8. Connect Claude Interfaces
 
@@ -284,9 +324,9 @@ On first query, users authenticate via Google SSO through Supabase Auth. The JWT
 
 ### Sync schedule
 
-The service automatically syncs all project sources:
-- Every 15 minutes during business hours (Mon-Fri, 8am-8pm)
-- Every hour outside business hours
+The service runs two scheduled jobs:
+- **Discovery** (hourly + on startup): crawls Notion to discover new programs and projects
+- **Source sync** (every 15 min during business hours, hourly otherwise): fetches new content from all discovered sources
 
 ### Monitoring
 

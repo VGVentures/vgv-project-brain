@@ -3,6 +3,8 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from vgv_rag.storage.supabase_queries import (
     update_source_sync_status,
     list_sources_for_project,
+    list_all_programs,
+    list_sources_for_program,
 )
 from vgv_rag.storage.pinecone_store import upsert_vectors, build_vector_id
 from vgv_rag.processing.chunker import chunk
@@ -35,7 +37,10 @@ async def sync_source(source: Source, connector) -> None:
                 }
                 for i, text in enumerate(chunks)
             ]
-            await upsert_vectors(namespace=source.project_id, vectors=vectors)
+            namespace = source.project_id or source.program_id
+            if not namespace:
+                raise ValueError(f"Source {source.id} has no project_id or program_id — cannot determine Pinecone namespace")
+            await upsert_vectors(namespace=namespace, vectors=vectors)
             chunk_offset += len(chunks)
 
         await update_source_sync_status(source.id, "success")
@@ -47,16 +52,31 @@ async def sync_source(source: Source, connector) -> None:
         await update_source_sync_status(source.id, "error", msg)
 
 
-def start_scheduler(get_connector) -> AsyncIOScheduler:
+def start_scheduler(get_connector, notion_token: str | None = None) -> AsyncIOScheduler:
     from vgv_rag.storage.client import get_client
+    from vgv_rag.ingestion.discovery import discover_all
+
+    async def run_discovery():
+        if not notion_token:
+            return
+        log.info("Discovery cycle starting...")
+        try:
+            stats = await discover_all(notion_token)
+            log.info("Discovery complete: %s", stats)
+        except Exception as exc:
+            log.error("Discovery cycle failed: %s", exc)
 
     async def run_sync():
         log.info("Sync cycle starting...")
         client = get_client()
+
+        # Sync project-level sources
         projects = client.table("projects").select("id").execute()
         for project in (projects.data or []):
             sources = await list_sources_for_project(project["id"])
             for source_dict in sources:
+                if source_dict.get("sync_status") == "archived":
+                    continue
                 connector = get_connector(source_dict["connector"])
                 if not connector:
                     continue
@@ -69,11 +89,39 @@ def start_scheduler(get_connector) -> AsyncIOScheduler:
                     last_synced_at=source_dict.get("last_synced_at"),
                 )
                 await sync_source(source=source, connector=connector)
+
+        # Sync program-level sources
+        programs = await list_all_programs()
+        for program in programs:
+            sources = await list_sources_for_program(program["id"])
+            for source_dict in sources:
+                if source_dict.get("sync_status") == "archived":
+                    continue
+                connector = get_connector(source_dict["connector"])
+                if not connector:
+                    continue
+                source = Source(
+                    id=source_dict["id"],
+                    project_id=None,
+                    program_id=source_dict.get("program_id"),
+                    connector=source_dict["connector"],
+                    source_url=source_dict["source_url"],
+                    source_id=source_dict["source_id"],
+                    last_synced_at=source_dict.get("last_synced_at"),
+                )
+                await sync_source(source=source, connector=connector)
+
         log.info("Sync cycle complete.")
+
+    from datetime import datetime, timedelta
 
     scheduler = AsyncIOScheduler()
     scheduler.add_job(run_sync, "cron", minute="*/15", hour="8-20", day_of_week="mon-fri")
     scheduler.add_job(run_sync, "cron", minute=0)
+    scheduler.add_job(run_discovery, "cron", minute=0)  # Hourly discovery
+    # Run discovery on startup (5s delay to let connectors initialize)
+    scheduler.add_job(run_discovery, "date", run_date=datetime.now() + timedelta(seconds=5))
     scheduler.start()
+
     log.info("Sync scheduler started.")
     return scheduler

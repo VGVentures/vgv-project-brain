@@ -1,7 +1,13 @@
+import logging
 from vgv_rag.processing.embedder import embed
 from vgv_rag.processing.reranker import rerank
-from vgv_rag.storage.supabase_queries import list_projects_for_user, get_project_by_name
+from vgv_rag.storage.supabase_queries import (
+    list_projects_for_user, get_project_by_name, get_project_by_id,
+    list_programs_for_user,
+)
 from vgv_rag.storage.pinecone_store import query_vectors
+
+log = logging.getLogger(__name__)
 
 RERANK_CANDIDATE_MULTIPLIER = 4
 
@@ -31,26 +37,48 @@ async def handle_search_project_context(
     if project_id not in [p["id"] for p in user_projects]:
         return f"Not authorized: you are not a member of this project."
 
+    # Build namespace list: project + parent program (if any)
+    namespaces_to_search = [project_id]
+
+    proj_record = await get_project_by_id(project_id)
+    if proj_record and proj_record.get("program_id"):
+        namespaces_to_search.append(proj_record["program_id"])
+
+    # If no project specified, also search all accessible programs
+    if not project:
+        user_programs = await list_programs_for_user(user_email)
+        for prog in user_programs:
+            if prog["id"] not in namespaces_to_search:
+                namespaces_to_search.append(prog["id"])
+
     # Build metadata filter
     filter_meta: dict | None = None
     if filters:
         filter_meta = {k: v for k, v in filters.items() if v} or None
 
-    # Embed and search
+    # Embed and search across all namespaces
     top_k = min(top_k, 20)
     vector = await embed(query)
-    candidates = await query_vectors(
-        namespace=project_id,
-        embedding=vector,
-        top_k=top_k * RERANK_CANDIDATE_MULTIPLIER,
-        filters=filter_meta,
-    )
 
-    if not candidates:
+    per_ns_candidates = max(top_k, (top_k * RERANK_CANDIDATE_MULTIPLIER) // len(namespaces_to_search))
+    all_candidates = []
+    for ns in namespaces_to_search:
+        try:
+            results = await query_vectors(
+                namespace=ns,
+                embedding=vector,
+                top_k=per_ns_candidates,
+                filters=filter_meta,
+            )
+            all_candidates.extend(results)
+        except Exception as exc:
+            log.warning("Search failed for namespace %s: %s", ns, exc)
+
+    if not all_candidates:
         return "No relevant results found."
 
-    # Rerank
-    results = await rerank(query, candidates, top_k=top_k)
+    # Rerank the merged candidate set
+    results = await rerank(query, all_candidates, top_k=top_k)
 
     if not results:
         return "No relevant results found."

@@ -23,8 +23,14 @@ def build_connector_registry():
         connectors["notion"] = NotionConnector(settings.notion_api_token)
     if settings.slack_bot_token:
         connectors["slack"] = SlackConnector(settings.slack_bot_token)
-    if settings.github_pat:
-        connectors["github"] = GitHubConnector(settings.github_pat)
+    if settings.github_app_id and settings.github_app_private_key and settings.github_app_installation_id:
+        connectors["github"] = GitHubConnector(
+            app_id=settings.github_app_id,
+            private_key=settings.github_app_private_key,
+            installation_id=settings.github_app_installation_id,
+        )
+    elif settings.github_pat:
+        connectors["github"] = GitHubConnector(pat=settings.github_pat)
     if settings.figma_api_token:
         connectors["figma"] = FigmaConnector(settings.figma_api_token)
     if all([settings.atlassian_api_token, settings.atlassian_email, settings.atlassian_domain]):
@@ -62,7 +68,7 @@ def create_app() -> Starlette:
         if not await verify_index():
             log.error("Pinecone index not found or not accessible. Check PINECONE_API_KEY and PINECONE_INDEX_NAME.")
         registry = build_connector_registry()
-        start_scheduler(registry.get)
+        start_scheduler(registry.get, notion_token=settings.notion_api_token)
 
     return Starlette(
         routes=[

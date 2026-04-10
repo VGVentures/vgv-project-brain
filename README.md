@@ -36,7 +36,10 @@ Edit `.env` and fill in:
 | `PINECONE_INDEX_NAME` | No | Pinecone index name (default: `vgv-project-rag`) |
 | `NOTION_API_TOKEN` | For Notion sync | Internal integration token |
 | `SLACK_BOT_TOKEN` | For Slack sync | Bot token (`xoxb-...`) |
-| `GITHUB_PAT` | For GitHub sync | Personal access token |
+| `GITHUB_APP_ID` | For GitHub sync (App) | GitHub App ID |
+| `GITHUB_APP_PRIVATE_KEY` | For GitHub sync (App) | PEM-encoded private key |
+| `GITHUB_APP_INSTALLATION_ID` | For GitHub sync (App) | Installation ID |
+| `GITHUB_PAT` | For GitHub sync (PAT fallback) | Personal access token |
 | `FIGMA_API_TOKEN` | For Figma sync | Personal access token |
 | `GOOGLE_SERVICE_ACCOUNT_JSON` | For Google Drive sync | Base64-encoded service account JSON key, or path to key file |
 | `ATLASSIAN_API_TOKEN` | For Jira sync | API token |
@@ -53,11 +56,13 @@ Create a Pinecone serverless index named `vgv-project-rag` (or your chosen name)
 
 ### 4. Run database migrations
 
-In the [Supabase SQL Editor](https://supabase.com/dashboard/project/_/sql/new), paste and run the contents of `src/vgv_rag/storage/migrations/001_initial_schema.sql`.
+In the [Supabase SQL Editor](https://supabase.com/dashboard/project/_/sql/new), paste and run the migrations from `src/vgv_rag/storage/migrations/` in order:
 
-This creates the `projects`, `sources`, and `project_members` tables. Vector storage is handled by Pinecone, not Supabase.
+1. `001_initial_schema.sql` — creates `projects`, `sources`, `project_members`
+2. `002_remove_chunks.sql` — removes unused pgvector setup
+3. `003_add_programs.sql` — adds `programs` table, program-project relationships, discovery RPC
 
-If deploying fresh, also run `002_remove_chunks.sql` to skip the now-unused pgvector setup from the initial migration.
+Vector storage is handled by Pinecone, not Supabase.
 
 If the schema is missing when the service starts, it will log an error with the exact dashboard URL to fix it.
 
@@ -74,9 +79,17 @@ The server starts on `http://localhost:3000`.
 
 On startup, the service verifies connectivity to both Supabase and Pinecone.
 
-## Onboarding a project
+## Auto-onboarding
 
-The seed script reads a Notion Project Hub page, discovers all linked sources (Slack channels, GitHub repos, Figma files, Google Drive folders, Jira boards), creates the project record in Supabase, and runs an initial Notion sync.
+The service automatically discovers all programs and projects from the Notion PHT teamspace:
+
+- **On startup + hourly**: crawls Notion `search()` to find program pages, follows project hub links, and upserts everything to Supabase
+- **Every 15 minutes**: syncs all discovered sources across all connectors
+- Programs and projects are organized hierarchically — program-level content (SOWs, account plans, Slack channels) is searchable by members of any child project
+
+### Manual onboarding (optional)
+
+For one-off imports, the seed script is still available:
 
 ```bash
 uv run python scripts/seed_project.py \
@@ -85,7 +98,7 @@ uv run python scripts/seed_project.py \
   --member "you@verygood.ventures"
 ```
 
-Repeat `--member` for each team member to add. Members can query only their own projects — membership is verified at the application layer before querying Pinecone.
+Members can query only their own projects — membership is verified at the application layer before querying Pinecone.
 
 ## Connecting to Claude
 
@@ -146,8 +159,10 @@ src/vgv_rag/
 │   └── tools/                  # Tool handler implementations
 ├── ingestion/
 │   ├── connectors/             # Notion, Slack, GitHub, Figma, Google Drive, Atlassian
+│   ├── discovery.py            # Auto-onboarding: crawls Notion, discovers programs/projects
+│   ├── program_parser.py       # Parses Notion program pages for project hubs/links
 │   ├── project_hub_parser.py   # Reads Notion Hub, discovers sources
-│   └── scheduler.py            # APScheduler cron-based sync
+│   └── scheduler.py            # APScheduler: hourly discovery + 15-min source sync
 └── main.py                     # Starlette app + startup wiring
 scripts/
 └── seed_project.py             # Project onboarding CLI
