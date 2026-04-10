@@ -72,7 +72,11 @@ erDiagram
 - **PR 1: GitHub App auth** (Task 7 + Task 8 partial) — standalone, no dependencies
 - **PR 2: Auto-onboarding** (Tasks 1-6, 8 partial, 9-10) — the larger feature
 
-**Task ordering fix (from technical review):** Task 9 (update `upsert_project`/`upsert_source` signatures) must run before Task 4 (discovery engine). The task order below reflects this.
+**Task ordering fix (from technical review):** Task 9 (update `upsert_project`/`upsert_source` signatures) moved to Task 3 (before discovery engine). Tasks renumbered accordingly.
+
+**PR grouping:**
+- **PR 1 (GitHub App):** Task 8, Task 9 (GitHub docs only)
+- **PR 2 (Auto-onboarding):** Tasks 1–7, Task 9 (onboarding docs), Task 10
 
 ---
 
@@ -135,6 +139,7 @@ Tests for:
 - `list_all_programs()` → returns all programs
 - `list_projects_for_program(program_id)` → returns projects under a program
 - `list_programs_for_user(user_email)` → returns programs where user is a member of any child project
+- `list_sources_for_program(program_id)` → returns sources attached to a program
 
 **Step 2: Add functions to `supabase_queries.py`**
 
@@ -154,6 +159,9 @@ async def list_projects_for_program(program_id: str) -> list[dict]:
 async def list_programs_for_user(user_email: str) -> list[dict]:
     # Join project_members → projects → programs
     # Return distinct programs where user is a member of any child project
+
+async def list_sources_for_program(program_id: str) -> list[dict]:
+    # Return sources where program_id matches
 ```
 
 **Step 3: Run tests, commit**
@@ -260,18 +268,16 @@ Reuse `_extract_page_id` and URL extraction helpers from `project_hub_parser.py`
 ```python
 async def parse_program_page(page_url: str, notion_token: str) -> ProgramConfig | None:
     """Parse a Notion program page. Returns None if the page is not a program page."""
-    # 1. Extract page ID from URL
-    # 2. Fetch child blocks
+    # 1. Extract page ID from URL (reuse _extract_page_id from project_hub_parser)
+    # 2. Fetch child blocks via Notion API
     # 3. Look for "Project Hubs" heading — if absent, return None (not a program page)
-    # 4. Extract project hub links from that section
-    # 5. Look for "Quick Links" / "Communication Channels" sections
-    # 6. Extract URLs from those sections
-    # 7. Return ProgramConfig
+    # 4. Extract project hub links (Notion page URLs) from that section
+    # 5. Look for "Quick Links" section, extract URLs (Drive, SOW, etc.)
+    # 6. Look for "Communication Channels" section, extract URLs (Slack, etc.)
+    # 7. Return ProgramConfig(project_hub_urls, quick_links, communication_channels)
 ```
 
-Uses the same block-parsing logic as `project_hub_parser.py` — extract URLs from paragraph/bookmark blocks between headings. Reuse the `_extract_page_id` and URL extraction helpers.
-
-**Step 3: Run tests, commit**
+**Step 4: Run tests, commit**
 
 ```bash
 git commit -m "feat: add program page parser for Notion PHT"
@@ -279,7 +285,7 @@ git commit -m "feat: add program page parser for Notion PHT"
 
 ---
 
-## Task 4: Create discovery engine
+## Task 5: Create discovery engine
 
 **Files:**
 - Create: `src/vgv_rag/ingestion/discovery.py`
@@ -370,8 +376,12 @@ async def discover_all(notion_token: str) -> dict:
                 project_id, project_config
             )
 
-    # 7. Mark stale sources (projects removed from program pages)
-    await _mark_stale_sources(stats)
+    # 7. Mark stale sources
+    # Compare previously known projects (from DB) against discovered projects.
+    # For each program, get existing projects from DB. If a project is in DB but
+    # was NOT discovered in this cycle, mark its sources as sync_status="archived".
+    # This handles projects removed from program pages without deleting vectors.
+    await _mark_stale_sources(discovered_project_urls, stats)
 
     log.info("Discovery complete: %s", stats)
     return stats
@@ -403,7 +413,7 @@ git commit -m "feat: add discovery engine for auto-onboarding from Notion"
 
 ---
 
-## Task 5: Integrate discovery into scheduler
+## Task 6: Integrate discovery into scheduler and add program-level sync
 
 **Files:**
 - Edit: `src/vgv_rag/ingestion/scheduler.py`
@@ -431,23 +441,51 @@ def start_scheduler(get_connector, notion_token: str | None = None) -> AsyncIOSc
     scheduler.add_job(run_discovery, "date", run_date=None)  # Immediate
 ```
 
-**Step 2: Update `main.py` to pass `notion_token` to scheduler**
+**Step 2: Update `run_sync` to also sync program-level sources**
+
+The existing sync loop iterates projects → sources. Add a second loop for programs → sources:
+
+```python
+async def run_sync():
+    # ... existing project sync loop ...
+
+    # Sync program-level sources
+    programs = await list_all_programs()
+    for program in programs:
+        sources = await list_sources_for_program(program["id"])
+        for source_dict in sources:
+            connector = get_connector(source_dict["connector"])
+            if not connector:
+                continue
+            source = Source(
+                id=source_dict["id"],
+                project_id=None,
+                program_id=source_dict["program_id"],
+                connector=source_dict["connector"],
+                source_url=source_dict["source_url"],
+                source_id=source_dict["source_id"],
+                last_synced_at=source_dict.get("last_synced_at"),
+            )
+            await sync_source(source=source, connector=connector)
+```
+
+**Step 3: Update `main.py` to pass `notion_token` to scheduler**
 
 ```python
 start_scheduler(registry.get, notion_token=settings.notion_api_token)
 ```
 
-**Step 3: Update tests — mock `discover_all` in scheduler tests**
+**Step 4: Update tests — mock `discover_all` and program sync in scheduler tests**
 
-**Step 4: Run tests, commit**
+**Step 5: Run tests, commit**
 
 ```bash
-git commit -m "feat: integrate discovery into scheduler with hourly cadence"
+git commit -m "feat: integrate discovery into scheduler with hourly cadence and program-level sync"
 ```
 
 ---
 
-## Task 6: Update search tool for program-level content access
+## Task 7: Update search tool for program-level content access
 
 **Files:**
 - Edit: `src/vgv_rag/server/tools/search.py`
@@ -499,7 +537,7 @@ git commit -m "feat: extend search to include program-level content for members"
 
 ---
 
-## Task 7: Rewrite GitHub connector for App auth
+## Task 8: Rewrite GitHub connector for App auth
 
 **Files:**
 - Edit: `src/vgv_rag/config/settings.py`
@@ -587,15 +625,13 @@ class GitHubConnector:
         }
         encoded_jwt = jwt.encode(payload, self._private_key, algorithm="RS256")
 
-        # Exchange JWT for installation token (via to_thread to avoid blocking event loop)
-        resp = await asyncio.to_thread(
-            lambda: httpx.post(
-                f"https://api.github.com/app/installations/{self._installation_id}/access_tokens",
-                headers={
-                    "Authorization": f"Bearer {encoded_jwt}",
-                    "Accept": "application/vnd.github+json",
-                },
-            )
+        # Exchange JWT for installation token (synchronous — callers already wrap in to_thread)
+        resp = httpx.post(
+            f"https://api.github.com/app/installations/{self._installation_id}/access_tokens",
+            headers={
+                "Authorization": f"Bearer {encoded_jwt}",
+                "Accept": "application/vnd.github+json",
+            },
         )
         resp.raise_for_status()
         data = resp.json()
@@ -635,7 +671,7 @@ git commit -m "feat: add GitHub App auth with PAT fallback"
 
 ---
 
-## Task 8: Update deployment docs
+## Task 9: Update deployment docs
 
 **Files:**
 - Edit: `docs/DEPLOYMENT.md`
@@ -705,13 +741,16 @@ git commit -m "docs: update deployment guide for auto-onboarding and GitHub App"
 
 ---
 
-## Task 9: Cleanup and full test run
+## Task 10: Cleanup and full test run
 
 **Files:**
 - Edit: `scripts/seed_project.py` (update to optionally accept `--program-url` for linking to a program)
+- Edit: `src/vgv_rag/storage/migrate.py` (update `check_schema` to verify `programs` table exists)
 - Run: `pytest -x` to verify all tests pass
 
-**Step 1: Run full test suite**
+**Step 1: Update `check_schema` to verify `programs` table**
+
+**Step 2: Run full test suite**
 
 ```bash
 pytest -x
