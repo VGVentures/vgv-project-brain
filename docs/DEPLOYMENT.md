@@ -1,13 +1,16 @@
-# Deployment Guide
+# Production Deployment Guide
 
-Step-by-step guide to deploying the VGV Project RAG Service from scratch.
+Step-by-step guide to deploying the VGV Project RAG Service to production.
+
+For local development setup, see the [README](../README.md).
+
+---
 
 ## Prerequisites
 
-- Python 3.12+
-- [uv](https://docs.astral.sh/uv/) package manager
-- [Docker](https://www.docker.com/) (for containerized deployment)
+- [Docker](https://www.docker.com/) (for containerized deployment) or Python 3.12+ with [uv](https://docs.astral.sh/uv/)
 - A VGV Google Workspace account (for SSO)
+- A domain or static IP for the deployment (for MCP URL + OAuth callback)
 
 ## 1. Create External Accounts
 
@@ -22,7 +25,7 @@ You need accounts with four services. All have free tiers sufficient for initial
    - **`anon` public key** → `SUPABASE_ANON_KEY`
    - **`service_role` secret key** → `SUPABASE_SERVICE_ROLE_KEY`
 
-> The service role key has full access to your database. Never expose it to clients.
+> The service role key has full access to your database. Never expose it to clients or commit it to version control.
 
 ### 1.2 Voyage.ai (embeddings + reranking)
 
@@ -63,14 +66,16 @@ The service uses two Voyage.ai models:
 
 ## 2. Connector Credentials
 
-Each connector is optional. The service activates only connectors whose credentials are present in the environment.
+Each connector is optional. The service activates only connectors whose credentials are present.
 
-### Notion
+### Notion (required for auto-discovery)
 
 1. Go to [notion.so/my-integrations](https://www.notion.so/my-integrations)
 2. Create an **Internal Integration** for the VGV workspace
-3. Grant it read access to the pages/databases you want to index
+3. Grant it access to the PHT teamspace (for auto-discovery) and any pages you want indexed
 4. Copy the **Internal Integration Secret** → `NOTION_API_TOKEN`
+
+> Without `NOTION_API_TOKEN`, auto-discovery is disabled and you must onboard projects manually with `seed_project.py`.
 
 ### Slack
 
@@ -103,7 +108,7 @@ A GitHub App provides org-level access to all repositories without personal toke
    - **Where can this app be installed?**: Only on this account
 4. Click **Create GitHub App**
 5. Note the **App ID** → `GITHUB_APP_ID`
-6. Generate a **Private Key** (.pem file) → `GITHUB_APP_PRIVATE_KEY`
+6. Generate a **Private Key** (.pem file) → `GITHUB_APP_PRIVATE_KEY` (paste the full PEM content including `-----BEGIN/END-----` headers)
 7. Go to **Install App** tab, install on VGVentures with **All repositories**
 8. Note the **Installation ID** from the URL → `GITHUB_APP_INSTALLATION_ID`
 
@@ -153,21 +158,17 @@ If you can't set up a GitHub App, use a personal access token:
 
 ### Run migrations
 
-In the [Supabase SQL Editor](https://supabase.com/dashboard/project/_/sql/new):
+In the [Supabase SQL Editor](https://supabase.com/dashboard/project/_/sql/new), paste and run each migration file in order:
 
-**For a fresh deployment**, run all migrations in order:
+| Migration | What it does |
+|---|---|
+| `001_initial_schema.sql` | Creates `projects`, `sources`, `project_members` tables |
+| `002_remove_chunks.sql` | Removes unused pgvector chunks table |
+| `003_add_programs.sql` | Adds `programs` table, program-project FKs, CHECK constraint, discovery RPC |
 
-```sql
--- 1. Run 001_initial_schema.sql (creates projects, sources, project_members)
--- 2. Run 002_remove_chunks.sql  (removes the unused chunks table and pgvector)
--- 3. Run 003_add_programs.sql   (adds programs table, program_id FKs, discovery RPC)
-```
+Files are in `src/vgv_rag/storage/migrations/`.
 
-Paste the contents of each file from `src/vgv_rag/storage/migrations/`.
-
-**For an existing deployment**, run only the migrations you haven't applied yet.
-
-After running the migrations, verify the tables exist:
+### Verify
 
 ```sql
 SELECT table_name FROM information_schema.tables
@@ -175,7 +176,7 @@ WHERE table_schema = 'public'
 ORDER BY table_name;
 ```
 
-You should see: `programs`, `project_members`, `projects`, `sources`.
+Expected: `programs`, `project_members`, `projects`, `sources`.
 
 ## 4. Configure the Environment
 
@@ -183,54 +184,87 @@ You should see: `programs`, `project_members`, `projects`, `sources`.
 cp .env.example .env
 ```
 
-Fill in all required values:
+Fill in all values. See the [README](../README.md#environment-variables) for the full variable reference.
+
+**Minimum required for startup:**
 
 ```bash
-# Required — service won't start without these
 SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=eyJ...
 SUPABASE_ANON_KEY=eyJ...
 VOYAGE_API_KEY=pa-...
 PINECONE_API_KEY=pcsk_...
-PINECONE_INDEX_NAME=vgv-project-rag
+```
 
-# Optional — add connectors as needed
+**For auto-discovery (recommended):**
+
+```bash
 NOTION_API_TOKEN=secret_...
-SLACK_BOT_TOKEN=xoxb-...
-# GitHub (choose App OR PAT)
-GITHUB_APP_ID=123456
-GITHUB_APP_PRIVATE_KEY=-----BEGIN RSA PRIVATE KEY-----\n...
-GITHUB_APP_INSTALLATION_ID=12345678
-# OR
-GITHUB_PAT=ghp_...
-FIGMA_API_TOKEN=figd_...
-GOOGLE_SERVICE_ACCOUNT_JSON=...
-ATLASSIAN_API_TOKEN=...
-ATLASSIAN_EMAIL=service-account@verygood.ventures
-ATLASSIAN_DOMAIN=verygoodventures.atlassian.net
 ```
 
 ## 5. Deploy
 
-### Option A: Docker Compose (VPS)
+### Option A: Docker Compose on a VPS
 
 Recommended for Hetzner, DigitalOcean, Vultr, or any VPS with Docker installed.
 
 ```bash
+# Clone the repo on your VPS
+git clone https://github.com/VGVentures/vgv-project-brain.git
+cd vgv-project-brain
+
+# Create and fill in .env
+cp .env.example .env
+nano .env
+
+# Build and start
 docker-compose up --build -d
 ```
 
-Verify it's running:
+**Verify:**
 
 ```bash
 curl http://localhost:3000/health
 # {"status":"ok","service":"vgv-project-rag"}
 ```
 
+**View logs:**
+
+```bash
+docker-compose logs -f rag-service
+```
+
+**Restart after config changes:**
+
+```bash
+docker-compose down && docker-compose up --build -d
+```
+
+**Expose via reverse proxy (nginx example):**
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name rag.verygood.ventures;
+
+    ssl_certificate     /etc/letsencrypt/live/rag.verygood.ventures/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/rag.verygood.ventures/privkey.pem;
+
+    location / {
+        proxy_pass http://localhost:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_read_timeout 86400;  # SSE connections are long-lived
+    }
+}
+```
+
 ### Option B: Google Cloud Run
 
 ```bash
-# Build and push
+# Build and push to Artifact Registry
 gcloud builds submit --tag gcr.io/PROJECT_ID/vgv-project-rag
 
 # Deploy
@@ -239,72 +273,93 @@ gcloud run deploy vgv-project-rag \
   --platform managed \
   --region us-central1 \
   --allow-unauthenticated \
-  --memory 512Mi \
+  --memory 1Gi \
   --cpu 1 \
   --min-instances 0 \
   --max-instances 3 \
-  --set-env-vars "SUPABASE_URL=...,SUPABASE_SERVICE_ROLE_KEY=...,VOYAGE_API_KEY=...,PINECONE_API_KEY=..."
+  --timeout 300 \
+  --set-env-vars "SUPABASE_URL=...,SUPABASE_SERVICE_ROLE_KEY=...,SUPABASE_ANON_KEY=...,VOYAGE_API_KEY=...,PINECONE_API_KEY=...,PINECONE_INDEX_NAME=vgv-project-rag"
 ```
 
-For the sync scheduler on Cloud Run, set up a [Cloud Scheduler](https://console.cloud.google.com/cloudscheduler) job to hit the service periodically, since Cloud Run scales to zero between requests.
+> **Secrets:** For sensitive values, use [Cloud Run secrets](https://cloud.google.com/run/docs/configuring/secrets) instead of `--set-env-vars`:
+> ```bash
+> gcloud run deploy vgv-project-rag \
+>   --set-secrets "SUPABASE_SERVICE_ROLE_KEY=supabase-service-key:latest,VOYAGE_API_KEY=voyage-key:latest"
+> ```
 
-### Option C: Run directly
+**Cloud Run + scheduler caveat:** Cloud Run scales to zero between requests. The built-in APScheduler won't run when there are no instances. Set up [Cloud Scheduler](https://console.cloud.google.com/cloudscheduler) to keep the scheduler running:
 
 ```bash
-uv sync
+# Trigger sync every 15 minutes
+gcloud scheduler jobs create http vgv-rag-sync \
+  --schedule "*/15 * * * *" \
+  --uri "https://vgv-project-rag-HASH-uc.a.run.app/health" \
+  --http-method GET
+
+# Trigger discovery hourly
+gcloud scheduler jobs create http vgv-rag-discovery \
+  --schedule "0 * * * *" \
+  --uri "https://vgv-project-rag-HASH-uc.a.run.app/health" \
+  --http-method GET
+```
+
+This keeps at least one instance warm during business hours. For true zero-cost idle, consider a VPS deployment instead.
+
+### Option C: Run directly (no Docker)
+
+```bash
+uv sync --no-dev
 uv run python -m vgv_rag.main
 ```
 
-## 6. Verify Startup
+Use a process manager like `systemd` or `supervisord` to keep it running:
 
-On startup, the service checks:
+```ini
+# /etc/systemd/system/vgv-rag.service
+[Unit]
+Description=VGV Project RAG Service
+After=network.target
+
+[Service]
+Type=simple
+User=vgv
+WorkingDirectory=/opt/vgv-project-brain
+EnvironmentFile=/opt/vgv-project-brain/.env
+ExecStart=/usr/local/bin/uv run python -m vgv_rag.main
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl enable vgv-rag
+sudo systemctl start vgv-rag
+sudo journalctl -u vgv-rag -f  # view logs
+```
+
+## 6. Verify Deployment
+
+### Startup checks
+
+On startup, the service verifies:
 
 1. **Supabase schema** — logs an error with the SQL Editor URL if tables are missing
-2. **Pinecone index** — logs an error if the index is unreachable or doesn't exist
+2. **Pinecone index** — logs an error if the index is unreachable
 
-Check the logs for any errors:
+Check logs for any errors after deploying.
 
-```bash
-# Docker
-docker-compose logs -f rag-service
-
-# Cloud Run
-gcloud run services logs read vgv-project-rag
-
-# Direct
-# Logs print to stdout
-```
-
-## 7. Auto-Onboarding
-
-The service automatically discovers all programs and projects from the Notion PHT teamspace.
-
-### Prerequisites
-1. Add the Notion integration to the PHT teamspace (gives access to all pages)
-2. Ensure program pages follow the template (contain a "Project Hubs" heading)
-3. Ensure project pages follow the template (contain a "Helpful Links" heading)
-
-### How it works
-- **On startup and hourly**: crawls Notion, discovers programs and projects
-- **Every 15 minutes**: syncs all discovered sources
-- New programs/projects are picked up automatically on the next discovery cycle
-- If a project is removed from a program page, its sources are marked as `archived` (vectors preserved)
-
-### Manual onboarding (optional)
-
-The seed script is still available for one-off imports:
+### Health check
 
 ```bash
-uv run python scripts/seed_project.py \
-  --hub-url "https://www.notion.so/verygoodventures/ProjectName-Hub-abc123" \
-  --name "Project Name" \
-  --member "alice@verygood.ventures" \
-  --member "bob@verygood.ventures"
+curl https://your-deployment-url/health
+# {"status":"ok","service":"vgv-project-rag"}
 ```
 
-## 8. Connect Claude Interfaces
+### Connect a Claude interface
 
-Add the MCP server URL to your Claude configuration:
+Add to your Claude MCP config:
 
 ```json
 {
@@ -316,9 +371,81 @@ Add the MCP server URL to your Claude configuration:
 }
 ```
 
-This works in Claude Code (`~/.claude.json`), Claude Desktop, and claude.ai.
+On first query, users authenticate via Google SSO through Supabase Auth. The JWT is cached by the MCP client.
 
-On first query, users authenticate via Google SSO through Supabase Auth. The JWT is cached by the MCP client for subsequent requests.
+### Test a search
+
+In Claude, try: *"Search for recent meeting notes about auth"*
+
+If no results, check that:
+1. At least one project has been onboarded (auto-discovery or `seed_project.py`)
+2. Sources have synced (use `list_sources` tool to check status)
+3. The user's email is in `project_members` for the relevant project
+
+## 7. Auto-Onboarding
+
+The service automatically discovers all programs and projects from the Notion PHT teamspace.
+
+### Prerequisites
+1. `NOTION_API_TOKEN` is set and the integration has access to the PHT teamspace
+2. Program pages follow the template (contain a "Project Hubs" heading)
+3. Project pages follow the template (contain a "Helpful Links" heading)
+
+### How it works
+- **On startup and hourly**: crawls Notion, discovers programs and projects, upserts records
+- **Every 15 minutes during business hours**: syncs all discovered sources
+- New programs/projects are picked up automatically on the next discovery cycle
+- If a project is removed from a program page, its sources are marked `archived` (vectors preserved, not synced)
+
+### Manual onboarding (optional)
+
+For one-off imports or projects not in the PHT:
+
+```bash
+uv run python scripts/seed_project.py \
+  --hub-url "https://www.notion.so/verygoodventures/ProjectName-Hub-abc123" \
+  --name "Project Name" \
+  --member "alice@verygood.ventures" \
+  --member "bob@verygood.ventures" \
+  --program-url "https://www.notion.so/verygoodventures/ProgramPage-def456"  # optional
+```
+
+## 8. Upgrading an Existing Deployment
+
+### Applying new migrations
+
+When a new migration is added (e.g., `004_*.sql`):
+
+1. Read the migration file to understand what it does
+2. Run it in the [Supabase SQL Editor](https://supabase.com/dashboard/project/_/sql/new)
+3. Restart the service
+
+> Migrations are idempotent (`IF NOT EXISTS`, `IF EXISTS`) so re-running is safe.
+
+### Deploying new code
+
+**Docker Compose (VPS):**
+
+```bash
+cd /path/to/vgv-project-brain
+git pull
+docker-compose down && docker-compose up --build -d
+```
+
+**Cloud Run:**
+
+```bash
+gcloud builds submit --tag gcr.io/PROJECT_ID/vgv-project-rag
+gcloud run deploy vgv-project-rag --image gcr.io/PROJECT_ID/vgv-project-rag
+```
+
+**Direct:**
+
+```bash
+git pull
+uv sync --no-dev
+sudo systemctl restart vgv-rag
+```
 
 ## 9. Ongoing Operations
 
@@ -330,15 +457,28 @@ The service runs two scheduled jobs:
 
 ### Monitoring
 
-- **Health check**: `GET /health`
-- **Source status**: Use the `list_sources` MCP tool to check sync status and errors
-- **Supabase Dashboard**: Monitor auth events, database size, and API usage
-- **Pinecone Console**: Monitor vector count, query latency, and index size
+| What | How |
+|---|---|
+| Service health | `GET /health` |
+| Source sync status | `list_sources` MCP tool, or query `sources` table in Supabase |
+| Auth events | Supabase Dashboard > Authentication > Logs |
+| Database size | Supabase Dashboard > Database > Reports |
+| Vector count/latency | Pinecone Console > Index > Metrics |
+| Application logs | `docker-compose logs -f` / `journalctl -u vgv-rag -f` / Cloud Run logs |
 
-### Adding new team members
+### Adding team members
 
-Members are added per-project via the seed script (`--member` flag) or directly in Supabase:
+Members are added per-project. Auto-discovery creates project records but does not assign members. Add members via:
 
+**Seed script:**
+```bash
+uv run python scripts/seed_project.py \
+  --hub-url "https://notion.so/existing-hub" \
+  --name "Existing Project" \
+  --member "newuser@verygood.ventures"
+```
+
+**SQL (Supabase SQL Editor or Dashboard):**
 ```sql
 INSERT INTO project_members (project_id, user_email)
 VALUES ('<project-uuid>', 'newuser@verygood.ventures');
@@ -347,16 +487,30 @@ VALUES ('<project-uuid>', 'newuser@verygood.ventures');
 ### Adding new connectors
 
 1. Add the connector's credentials to `.env`
-2. Restart the service — it auto-discovers new connectors on startup
-3. Re-run the seed script or wait for the next sync cycle to pick up new sources
+2. Restart the service — connectors are initialized on startup
+3. Sources from auto-discovery will begin syncing on the next cycle
+
+### Rotating credentials
+
+1. Update the credential in `.env`
+2. Restart the service
+3. Sources will re-authenticate on the next sync cycle
+
+For GitHub App private keys, generate a new key in the GitHub App settings, update `GITHUB_APP_PRIVATE_KEY`, and restart.
 
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| Startup error: "Database schema not found" | Migrations not run | Run the SQL migrations in the Supabase SQL Editor |
-| Startup error: "Pinecone index not found" | Index doesn't exist or wrong name | Create the index in Pinecone console (1024 dims, cosine) |
-| Search returns no results | No data indexed yet | Run `seed_project.py` to onboard a project |
-| "Not authorized" on search | User not in `project_members` | Add the user's email to the project |
-| Connector not activating | Missing credentials | Check `.env` for the connector's token |
-| Sync errors in `list_sources` | API rate limits or expired tokens | Check the `sync_error` field and refresh the token |
+| Startup: "Database schema not found" | Migrations not run | Run SQL migrations in Supabase SQL Editor |
+| Startup: "Pinecone index not found" | Index missing or wrong name | Create index in Pinecone console (1024 dims, cosine) |
+| Search returns no results | No data indexed | Check `list_sources` — wait for sync or run `seed_project.py` |
+| Search: "Not authorized" | User not in `project_members` | Add user email to the project |
+| Search: "No projects found" | User has no project memberships | Add user to at least one project |
+| Connector not activating | Missing env var | Check `.env` for the connector's credentials |
+| Sync errors in `list_sources` | API rate limits or expired tokens | Check `sync_error` column, refresh the credential |
+| Discovery finds no programs | Notion integration lacks access | Share the PHT teamspace with the integration |
+| Discovery finds programs but no projects | Program pages missing "Project Hubs" heading | Verify page template |
+| GitHub App: 401 errors | Wrong App ID, key, or installation ID | Regenerate private key, verify installation |
+| Google Drive: 403 errors | Folder not shared with service account | Share folder with the SA email address |
+| SSE connection drops | Reverse proxy timeout too short | Set `proxy_read_timeout 86400` in nginx |
